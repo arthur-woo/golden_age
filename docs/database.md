@@ -234,11 +234,17 @@ Training Dataset은 버전 단위로 관리한다.
 
 # 시세 데이터
 
-OHLCV 데이터는 Append Only 방식으로 저장한다.
+분봉과 일봉 OHLCV 데이터는 `mkt_candle`에 지속적으로 누적 저장한다.
 
-과거 데이터는 수정하지 않는다.
+특히 `1m` 분봉은 Strategy, Feature Builder, ML Dataset의 핵심 입력 데이터다.
+
+시세 데이터는 Append Only 방식을 기본으로 한다.
+
+과거 데이터는 임의로 수정하지 않는다.
 
 필요 시 재수집하여 교체한다.
+
+장기 운영 시 `opened_at` 기준 파티셔닝과 보관 정책을 검토한다.
 
 ---
 

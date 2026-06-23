@@ -179,9 +179,22 @@ Broker API 토큰을 저장한다.
 
 ## mkt_candle
 
-OHLCV 데이터를 저장한다.
+분봉과 일봉 OHLCV 데이터를 저장한다.
 
-Append-only를 기본으로 한다.
+Golden Age는 분봉 데이터를 지속적으로 누적 저장한다.
+
+Strategy, Feature Builder, ML Dataset은 `mkt_candle`을 주요 입력 데이터로 사용한다.
+
+Append-only를 기본으로 하며, 과거 캔들을 직접 update하지 않는다.
+
+잘못 수집된 캔들은 같은 키로 덮어쓰지 않고 재수집 작업에서 명확한 기준으로 교체한다.
+
+초기 운영 timeframe은 다음을 기본으로 한다.
+
+- `1m`
+- `5m`
+- `15m`
+- `1d`
 
 | 컬럼 | 타입 | 설명 |
 | --- | --- | --- |
@@ -205,6 +218,13 @@ Append-only를 기본으로 한다.
 인덱스
 
 - `(stock_id, timeframe, opened_at desc)`
+
+운영 메모
+
+- 수집 배치는 마지막 저장 시각 이후의 캔들만 가져온다.
+- 장기 운영 시 `opened_at` 기준 월별 또는 연도별 파티셔닝을 검토한다.
+- 자주 쓰는 조회는 특정 종목, 특정 timeframe, 최근 N개 캔들 조회다.
+- `1m` 데이터가 가장 많이 쌓이므로 우선 인덱스와 보관 정책을 관리한다.
 
 ---
 
