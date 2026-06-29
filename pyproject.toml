@@ -1,8 +1,17 @@
 [project]
 name = "golden-age"
 version = "0.1.0"
-description = "Add your description here"
+description = "Personal Automated Trading Platform for Korea Investment Open API"
 requires-python = ">=3.11.2"
 dependencies = [
-    "django>=5.2.15",
+    "django>=5.2,<6.0",
+    "psycopg[binary]>=3.2",
+    "django-environ>=0.11",
+    "django-unfold>=0.45",
+    "requests>=2.31",
+]
+
+[tool.uv]
+dev-dependencies = [
+    "django-extensions>=3.2",
 ]

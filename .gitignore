@@ -105,3 +105,9 @@ celerybeat-schedule.db
 
 /local
 .vscode
+
+# Python virtual environment (uv)
+.venv/
+
+# Docker secrets
+docker/.env
