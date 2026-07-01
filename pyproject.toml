@@ -4,11 +4,17 @@ version = "0.1.0"
 description = "Personal Automated Trading Platform for Korea Investment Open API"
 requires-python = ">=3.11.2"
 dependencies = [
-    "django>=5.2,<6.0",
-    "psycopg[binary]>=3.2",
-    "django-environ>=0.11",
-    "django-unfold>=0.45",
-    "requests>=2.31",
+    "django>=5.2.15",
+    "pandas>=2.0.0",
+    "requests>=2.31.0",
+    "finance-datareader>=0.9.50",
+    "tqdm>=4.66.0",
+    "yfinance>=0.2.30",
+    "lightgbm>=4.0.0",
+    "scikit-learn>=1.3.0",
+    "django-environ>=0.14.0",
+    "django-unfold>=0.91.0",
+    "psycopg2-binary>=2.9.12",
 ]
 
 [tool.uv]

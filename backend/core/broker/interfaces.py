@@ -30,3 +30,8 @@ class BaseBroker(ABC):
     ) -> OrderResultDTO:
         """주문 생성"""
         pass
+
+    @abstractmethod
+    def get_minute_chart(self, symbol: str, period: int = 5) -> "pd.DataFrame":
+        """분봉 데이터 조회 (DataFrame 반환: date, open, high, low, close, volume)"""
+        pass

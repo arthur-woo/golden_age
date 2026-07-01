@@ -127,3 +127,60 @@ class KoreaInvestmentBroker(BaseBroker):
             error_message=error_message,
             raw_payload=data
         )
+
+    def get_minute_chart(self, symbol: str, period: int = 5) -> "pd.DataFrame":
+        """당일 분봉 데이터 조회 (KIS API)"""
+        import pandas as pd
+        from datetime import datetime
+        
+        headers = {"tr_id": "FHKST03010200"}
+        params = {
+            "FID_ETC_CLS_CODE": "",
+            "FID_COND_MRKT_DIV_CODE": "J",
+            "FID_INPUT_ISCD": symbol,
+            "FID_INPUT_HOUR_1": datetime.now().strftime("%H%M%S"),
+            "FID_PW_DATA_INCU_YN": "N",
+        }
+
+        response = self.client.request(
+            method="GET",
+            path="/uapi/domestic-stock/v1/quotations/inquire-time-itemchartprice",
+            headers=headers,
+            params=params
+        )
+        data = response.json()
+        
+        output2 = data.get("output2", [])
+        if not output2:
+            return pd.DataFrame()
+            
+        # KIS API 분봉 응답을 DataFrame으로 변환
+        # 응답 필드: stck_bsop_date(일자), stck_cntg_hour(체결시간), stck_prpr(현재가/종가), stck_oprc(시가), stck_hgpr(고가), stck_lwpr(저가), cntg_vol(체결거래량)
+        df = pd.DataFrame(output2)
+        
+        df['date'] = pd.to_datetime(df['stck_bsop_date'] + df['stck_cntg_hour'], format='%Y%m%d%H%M%S')
+        df['open'] = df['stck_oprc'].astype(float)
+        df['high'] = df['stck_hgpr'].astype(float)
+        df['low'] = df['stck_lwpr'].astype(float)
+        df['close'] = df['stck_prpr'].astype(float)
+        df['volume'] = df['cntg_vol'].astype(float)
+        
+        # 필요한 컬럼만 추출
+        df = df[['date', 'open', 'high', 'low', 'close', 'volume']]
+        
+        # 시간 오름차순(과거->현재)으로 정렬 (보통 KIS는 최신순으로 줌)
+        df = df.sort_values('date').reset_index(drop=True)
+        
+        # KIS는 기본적으로 1분봉이나 5분봉 등을 주는 파라미터가 없거나 다를 수 있습니다.
+        # 기본적으로 리샘플링하여 5분봉으로 맞춥니다.
+        df.set_index('date', inplace=True)
+        df = df.resample(f'{period}min', label='right', closed='right').agg({
+            'open': 'first',
+            'high': 'max',
+            'low': 'min',
+            'close': 'last',
+            'volume': 'sum'
+        }).dropna().reset_index()
+        
+        return df
+

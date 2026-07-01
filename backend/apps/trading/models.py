@@ -191,3 +191,52 @@ class TraderStrategy(models.Model):
 
     def __str__(self) -> str:
         return f"{self.trader} - Slot {self.slot}: {self.strategy_version}"
+
+
+class TraderTargetStock(models.Model):
+    """
+    Trader별 감시/매매 대상 종목 (trd_trader_target_stock)
+    
+    최대 20개 종목을 지정할 수 있으며, 각 종목별로 ML Filter 강도를 다르게 설정할 수 있다.
+    """
+    trader = models.ForeignKey(Trader, on_delete=models.CASCADE, related_name="target_stocks")
+    stock = models.ForeignKey("stock.Stock", on_delete=models.PROTECT, related_name="targeted_by")
+    ml_threshold = models.DecimalField(
+        max_digits=4, decimal_places=2, default=0.50,
+        help_text="ML 필터 임계값 (예: 0.50=B타입, 0.70=A타입)"
+    )
+    is_active = models.BooleanField(default=True, help_text="현재 매매 대상 여부")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "trd_trader_target_stock"
+        verbose_name = "Trader 대상 종목"
+        verbose_name_plural = "Trader 대상 종목 목록"
+        unique_together = [("trader", "stock")]
+        indexes = [
+            models.Index(fields=["trader", "is_active"], name="trd_target_trader_active_idx"),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.trader} -> {self.stock.name} (ML: {self.ml_threshold})"
+
+
+class DecisionLog(models.Model):
+    """
+    Trader의 최종 매매 판단 기록 (trd_decision_log)
+    """
+    trader = models.ForeignKey(Trader, on_delete=models.CASCADE, related_name="decisions")
+    stock = models.ForeignKey("stock.Stock", on_delete=models.PROTECT, related_name="trader_decisions")
+    decision = models.CharField(max_length=16, help_text="BUY / SELL / HOLD")
+    score = models.DecimalField(max_digits=10, decimal_places=6, default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "trd_decision_log"
+        verbose_name = "매매 판단 로그"
+        verbose_name_plural = "매매 판단 로그 목록"
+
+    def __str__(self) -> str:
+        return f"{self.trader} {self.stock} {self.decision} ({self.score})"
+

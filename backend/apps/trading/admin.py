@@ -1,7 +1,7 @@
 from django.contrib import admin
 from unfold.admin import ModelAdmin, TabularInline
 
-from .models import Strategy, StrategyVersion, Trader, TraderStrategy
+from .models import Strategy, StrategyVersion, Trader, TraderStrategy, TraderTargetStock
 
 
 class TraderStrategyInline(TabularInline):
@@ -10,6 +10,11 @@ class TraderStrategyInline(TabularInline):
     fields = ("slot", "strategy_version", "weight", "is_active", "config_payload")
     readonly_fields = ()
 
+class TraderTargetStockInline(TabularInline):
+    model = TraderTargetStock
+    extra = 0
+    fields = ("stock", "ml_threshold", "is_active")
+    readonly_fields = ()
 
 @admin.register(Trader)
 class TraderAdmin(ModelAdmin):
@@ -18,7 +23,7 @@ class TraderAdmin(ModelAdmin):
     search_fields = ("name", "code", "account__name")
     readonly_fields = ("created_at", "updated_at")
     list_select_related = ("account",)
-    inlines = [TraderStrategyInline]
+    inlines = [TraderStrategyInline, TraderTargetStockInline]
 
     fieldsets = (
         ("기본 정보", {
