@@ -23,11 +23,13 @@ INSTALLED_APPS = [
     "django.contrib.staticfiles",
     # Third-party
     "django_extensions",
+    "django_q",
     # Local apps
     "apps.account",
     "apps.market",
     "apps.order",
     "apps.stock",
+    "apps.system",
     "apps.trading",
 ]
 
@@ -79,3 +81,12 @@ STATIC_URL = "static/"
 
 # Primary key field type - bigint 사용 (db_schema.md 규칙)
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
+
+# Django Q2 - Task scheduler
+Q_CLUSTER = {
+    "name": "golden_age",
+    "workers": 2,
+    "timeout": 300,
+    "retry": 360,
+    "orm": "default",  # ORM broker 사용 (별도 Redis 불요)
+}

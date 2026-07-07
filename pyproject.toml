@@ -9,6 +9,9 @@ dependencies = [
     "django-environ>=0.11",
     "django-unfold>=0.45",
     "requests>=2.31",
+    "django-q2>=1.7",
+    "lightgbm>=4.0",
+    "numpy>=1.26",
 ]
 
 [tool.uv]
