@@ -1,7 +1,7 @@
 from django.contrib import admin
 from unfold.admin import ModelAdmin
 
-from .models import Account, BrokerToken
+from .models import Account, BrokerToken, ExecutionRun, CashLedger, PositionLedger, BalanceSnapshot
 
 
 @admin.register(Account)
@@ -38,3 +38,31 @@ class BrokerTokenAdmin(ModelAdmin):
     @admin.display(description="유효 여부", boolean=True)
     def is_valid(self, obj: BrokerToken) -> bool:
         return obj.is_valid
+
+
+@admin.register(ExecutionRun)
+class ExecutionRunAdmin(ModelAdmin):
+    list_display = ("id", "account", "run_type", "status", "started_at", "finished_at")
+    list_filter = ("status", "run_type", "account")
+    readonly_fields = ("created_at",)
+
+
+@admin.register(CashLedger)
+class CashLedgerAdmin(ModelAdmin):
+    list_display = ("id", "account", "event_type", "amount", "currency", "occurred_at")
+    list_filter = ("event_type", "currency", "account")
+    readonly_fields = ("created_at",)
+
+
+@admin.register(PositionLedger)
+class PositionLedgerAdmin(ModelAdmin):
+    list_display = ("id", "account", "stock", "quantity_delta", "price", "occurred_at")
+    list_filter = ("account", "stock")
+    readonly_fields = ("created_at",)
+
+
+@admin.register(BalanceSnapshot)
+class BalanceSnapshotAdmin(ModelAdmin):
+    list_display = ("id", "account", "cash_balance", "total_asset_value", "snapshotted_at")
+    list_filter = ("account",)
+    readonly_fields = ("created_at",)

@@ -1,7 +1,10 @@
 from django.contrib import admin
 from unfold.admin import ModelAdmin, TabularInline
 
-from .models import Strategy, StrategyVersion, Trader, TraderStrategy
+from .models import (
+    Strategy, StrategyVersion, Trader, TraderStrategy,
+    TraderExecutionRun, StrategyDecisionLog, MLOutputLog, DecisionLog,
+)
 
 
 class TraderStrategyInline(TabularInline):
@@ -68,3 +71,40 @@ class StrategyVersionAdmin(ModelAdmin):
     search_fields = ("strategy__code", "version", "module_path")
     readonly_fields = ("created_at",)
     list_select_related = ("strategy",)
+
+
+@admin.register(TraderExecutionRun)
+class TraderExecutionRunAdmin(ModelAdmin):
+    list_display = ("id", "trader", "account_run", "status", "started_at", "finished_at")
+    list_filter = ("status", "trader")
+    readonly_fields = ("created_at",)
+    list_select_related = ("trader", "account_run")
+
+
+@admin.register(StrategyDecisionLog)
+class StrategyDecisionLogAdmin(ModelAdmin):
+    list_display = ("id", "trader_run", "strategy_version", "stock", "action", "confidence_score", "decided_at")
+    list_filter = ("action", "strategy_version__strategy__namespace")
+    readonly_fields = ("created_at",)
+    list_select_related = ("trader_run", "strategy_version", "stock")
+
+
+@admin.register(MLOutputLog)
+class MLOutputLogAdmin(ModelAdmin):
+    list_display = ("id", "trader_run", "model_artifact", "trade_probability", "risk_score", "expected_return", "created_at")
+    list_filter = ("model_artifact",)
+    readonly_fields = ("created_at",)
+    list_select_related = ("trader_run", "model_artifact")
+
+
+@admin.register(DecisionLog)
+class DecisionLogAdmin(ModelAdmin):
+    list_display = (
+        "id", "trader_run", "stock", "final_action", "final_score",
+        "position_size_ratio", "stop_loss_ratio", "take_profit_ratio",
+        "target_quantity", "decided_at"
+    )
+    list_filter = ("final_action", "stock")
+    readonly_fields = ("created_at",)
+    list_select_related = ("trader_run", "stock", "ml_output_log")
+
