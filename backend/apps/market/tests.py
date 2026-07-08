@@ -387,3 +387,38 @@ class CrossSectionalFeatureTestCase(SimpleTestCase):
         feats = build_features(candles)
         self.assertNotIn("excess_ret_1", feats)
         self.assertNotIn("regime_code", feats)
+
+
+import tempfile as _tempfile
+from pathlib import Path as _Path
+
+
+class ImportCsvCommandTestCase(TestCase):
+    def _write_csv(self, directory, symbol, rows):
+        p = _Path(directory) / f"{symbol}.csv"
+        with open(p, "w") as f:
+            f.write("date,open,high,low,close,volume,Change\n")
+            for r in rows:
+                f.write(",".join(str(x) for x in r) + "\n")
+
+    def test_import_persists_and_creates_stock(self):
+        with _tempfile.TemporaryDirectory() as d:
+            self._write_csv(d, "000660", [
+                ("2025-06-24", 270000, 283000, 269500, 278500, 5436312, 0.073),
+                ("2025-06-25", 278500, 280000, 275000, 279000, 3210000, 0.0018),
+            ])
+            call_command("import_csv_candles", "--dir", d, stdout=StringIO())
+
+            stock = Stock.objects.get(symbol="000660")
+            self.assertEqual(stock.market, Stock.Market.KOSPI)
+            candles = Candle.objects.filter(
+                stock=stock, timeframe=Candle.Timeframe.DAY_1, source="csv"
+            )
+            self.assertEqual(candles.count(), 2)
+            first = candles.order_by("opened_at").first()
+            self.assertEqual(first.open_price, Decimal("270000"))
+            self.assertEqual(first.close_price, Decimal("278500"))
+
+            # 재실행해도 멱등(중복 없음)
+            call_command("import_csv_candles", "--dir", d, stdout=StringIO())
+            self.assertEqual(candles.count(), 2)
