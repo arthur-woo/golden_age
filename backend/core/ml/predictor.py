@@ -72,11 +72,13 @@ class LightGBMPredictor:
         labels: Sequence[int],
         params: Optional[dict] = None,
         num_boost_round: int = DEFAULT_NUM_ROUNDS,
+        sample_weight: Optional[Sequence[float]] = None,
     ) -> tuple["LightGBMPredictor", dict]:
         """
         Feature dict + 라벨로 학습하고 (predictor, metrics) 를 반환한다.
 
         feature_names 는 전체 dict 키의 정렬된 합집합으로 고정한다.
+        sample_weight: 표본 가중치(겹침 라벨 uniqueness 등). None이면 균등.
         """
         if len(feature_dicts) != len(labels):
             raise ValueError("feature 수와 label 수가 다릅니다.")
@@ -86,8 +88,15 @@ class LightGBMPredictor:
         feature_names = sorted({k for d in feature_dicts for k in d.keys()})
         X = _vectorize(feature_dicts, feature_names)
         y = np.asarray(labels, dtype=int)
+        weight = (
+            np.asarray(sample_weight, dtype=float)
+            if sample_weight is not None
+            else None
+        )
 
-        train_set = lgb.Dataset(X, label=y, feature_name=list(feature_names))
+        train_set = lgb.Dataset(
+            X, label=y, weight=weight, feature_name=list(feature_names)
+        )
         booster = lgb.train(
             params or DEFAULT_PARAMS,
             train_set,

@@ -338,3 +338,56 @@ class TrainCommandTestCase(TestCase):
                 model_artifact=artifact, status=ModelDeployment.Status.ACTIVE
             ).exists()
         )
+
+
+from core.ml.wfv import compute_uniqueness_weights, run_dataset_walk_forward
+
+
+class UniquenessWeightTestCase(SimpleTestCase):
+    def test_isolated_sample_gets_full_weight(self):
+        # (5,6)은 겹치지 않음 → 1.0, (0,2)/(1,3)은 겹침 → <1.0
+        weights = compute_uniqueness_weights([(0, 2), (1, 3), (5, 6)])
+        self.assertEqual(weights[2], 1.0)
+        self.assertLess(weights[0], 1.0)
+        self.assertLess(weights[1], 1.0)
+
+    def test_empty(self):
+        self.assertEqual(compute_uniqueness_weights([]), [])
+
+    def test_train_accepts_sample_weight(self):
+        feats = [{"x": 1.0} if i % 2 == 0 else {"x": -1.0} for i in range(20)]
+        labels = [1 if i % 2 == 0 else 0 for i in range(20)]
+        w = [0.5] * 20
+        pred, _ = LightGBMPredictor.train(feats, labels, num_boost_round=10, sample_weight=w)
+        self.assertIsNotNone(pred.booster)
+
+
+class DatasetWalkForwardTestCase(TestCase):
+    def setUp(self):
+        self.stock = Stock.objects.create(
+            market=Stock.Market.KOSPI, symbol="005930", name="삼성전자"
+        )
+        base = datetime(2024, 1, 2, 9, 0, tzinfo=dt_timezone.utc)
+        price = 70000
+        for i in range(60):
+            price += 200 if (i % 10) < 5 else -200
+            p = Decimal(str(price))
+            Candle.objects.create(
+                stock=self.stock, timeframe=Candle.Timeframe.MIN_1,
+                opened_at=base + timedelta(minutes=i),
+                open_price=p, high_price=p, low_price=p, close_price=p,
+                volume=Decimal("1000"), source="test",
+            )
+
+    def test_run_dataset_walk_forward(self):
+        dataset = build_dataset_from_candles(
+            self.stock, name="s", version="v1",
+            config=DatasetConfig(upper=0.002, lower=0.002, horizon=5, min_history=20, cost=0.0),
+        )
+        result = run_dataset_walk_forward(dataset, train_size=15, test_size=5)
+        self.assertGreater(result["n_folds"], 0)
+        self.assertEqual(len(result["folds"]), result["n_folds"])
+        self.assertTrue(0.0 <= result["auc_mean"] <= 1.0)
+        for f in result["folds"]:
+            self.assertIn("auc", f)
+            self.assertEqual(f["n_test"], 5)
