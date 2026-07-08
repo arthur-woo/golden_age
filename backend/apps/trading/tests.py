@@ -797,3 +797,18 @@ class MultiBarBacktestTestCase(TestCase):
             result["positions"].get(self.stock.symbol, Decimal("0")), Decimal("0")
         )
         self.assertLess(result["cash"], Decimal("10000000"))  # 매수+비용으로 현금 감소
+
+        # TCA 지표/자본곡선 검증 (C-11)
+        m = result["metrics"]
+        for key in (
+            "net_pnl",
+            "total_cost",
+            "cost_drag",
+            "max_drawdown",
+            "sharpe",
+            "num_fills",
+        ):
+            self.assertIn(key, m)
+        self.assertGreater(m["num_fills"], 0)
+        self.assertGreater(m["total_cost"], 0.0)  # 실거래 비용 모델이 반영됨
+        self.assertEqual(len(result["equity_curve"]), result["num_bars"] + 1)

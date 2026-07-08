@@ -18,10 +18,12 @@ from typing import Iterable, Optional
 from django.utils import timezone
 
 from apps.account.models import ExecutionRun
+from apps.order.models import TradeExecution
 from apps.stock.models import Stock
 from apps.trading.models import Trader, TraderExecutionRun
 from core.backtest.broker import BacktestBroker
 from core.backtest.costs import CostConfig
+from core.backtest import tca
 from core.pipeline.trader_executor import execute_trader_for_stock
 
 
@@ -37,7 +39,8 @@ def run_trader_backtest(
     trader를 BacktestBroker로 다봉 구동한다.
 
     Returns:
-        dict(broker, final_equity, cash, positions, num_bars)
+        dict(broker, final_equity, cash, positions, num_bars, equity_curve, metrics)
+        metrics는 core.backtest.tca.summarize 결과(순PnL·승률·비용드래그·MDD·샤프 등).
     """
     broker = BacktestBroker(initial_cash, cost_config)
 
@@ -49,6 +52,7 @@ def run_trader_backtest(
     )
 
     num_bars = 0
+    equity_curve: list[float] = [float(initial_cash)]
     for as_of, exec_price, volume in decision_bars:
         broker.set_market(stock.symbol, Decimal(str(exec_price)), Decimal(str(volume)))
         run = TraderExecutionRun.objects.create(
@@ -58,6 +62,7 @@ def run_trader_backtest(
             started_at=as_of,
         )
         execute_trader_for_stock(trader, run, stock, regime, as_of=as_of, broker=broker)
+        equity_curve.append(float(broker.get_balance().total_asset_value))
         num_bars += 1
 
     balance = broker.get_balance()
@@ -65,10 +70,28 @@ def run_trader_backtest(
     account_run.finished_at = timezone.now()
     account_run.save(update_fields=["status", "finished_at"])
 
+    # 체결 내역 → TCA 지표
+    fills = [
+        {
+            "side": ex.side,
+            "qty": ex.executed_quantity,
+            "price": ex.executed_price,
+            "cost": float(ex.fee_amount + ex.tax_amount + ex.slippage_amount),
+        }
+        for ex in TradeExecution.objects.filter(account=trader.account).order_by(
+            "executed_at", "id"
+        )
+    ]
+    metrics = tca.summarize(
+        float(initial_cash), float(balance.total_asset_value), equity_curve, fills
+    )
+
     return {
         "broker": broker,
         "final_equity": balance.total_asset_value,
         "cash": balance.cash_balance,
         "positions": dict(broker.positions),
         "num_bars": num_bars,
+        "equity_curve": equity_curve,
+        "metrics": metrics,
     }

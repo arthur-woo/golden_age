@@ -287,3 +287,53 @@ class RiskGuardTestCase(SimpleTestCase):
         d = can_open_new_position(state, add_notional=1_000_000, limits=RiskLimits(max_position_ratio=1.0))
         self.assertFalse(d.allowed)
         self.assertIn("총노출", d.reason)
+
+
+from core.backtest import tca
+
+
+class TCATestCase(SimpleTestCase):
+    def test_fifo_trade_pnls(self):
+        fills = [
+            {"side": "BUY", "qty": 10, "price": 100, "cost": 0},
+            {"side": "SELL", "qty": 10, "price": 110, "cost": 0},
+        ]
+        self.assertEqual(tca.compute_trade_pnls(fills), [100.0])
+
+    def test_partial_fill_matches_fifo(self):
+        fills = [
+            {"side": "BUY", "qty": 10, "price": 100, "cost": 0},
+            {"side": "SELL", "qty": 5, "price": 110, "cost": 0},
+        ]
+        pnls = tca.compute_trade_pnls(fills)
+        self.assertEqual(pnls, [50.0])  # (110-100)*5
+
+    def test_cost_reduces_pnl(self):
+        no_cost = tca.compute_trade_pnls([
+            {"side": "BUY", "qty": 10, "price": 100, "cost": 0},
+            {"side": "SELL", "qty": 10, "price": 110, "cost": 0},
+        ])[0]
+        with_cost = tca.compute_trade_pnls([
+            {"side": "BUY", "qty": 10, "price": 100, "cost": 50},
+            {"side": "SELL", "qty": 10, "price": 110, "cost": 50},
+        ])[0]
+        self.assertLess(with_cost, no_cost)
+
+    def test_max_drawdown(self):
+        self.assertAlmostEqual(tca.max_drawdown([100, 120, 90, 110]), 0.25, places=6)
+
+    def test_sharpe_flat_is_zero(self):
+        self.assertEqual(tca.sharpe([100, 100, 100]), 0.0)
+
+    def test_summarize_keys(self):
+        m = tca.summarize(
+            1000.0, 1050.0, [1000, 1020, 1050],
+            [{"side": "BUY", "qty": 10, "price": 100, "cost": 5},
+             {"side": "SELL", "qty": 10, "price": 105, "cost": 5}],
+        )
+        self.assertEqual(m["net_pnl"], 50.0)
+        self.assertEqual(m["num_round_trips"], 1)
+        self.assertEqual(m["win_rate"], 1.0)
+        self.assertEqual(m["total_cost"], 10.0)
+        self.assertIn("max_drawdown", m)
+        self.assertIn("sharpe", m)
