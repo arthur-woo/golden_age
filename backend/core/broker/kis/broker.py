@@ -47,6 +47,28 @@ def parse_minute_candles(data: dict) -> list[dict]:
     return candles
 
 
+def parse_executions(data: dict) -> list[dict]:
+    """
+    KIS 일별주문체결조회 응답(output1)을 파싱한다.
+
+    반환: [{order_no, symbol, ordered_qty, filled_qty, avg_price, remaining_qty}]
+    """
+    rows = data.get("output1", []) or []
+    executions: list[dict] = []
+    for row in rows:
+        executions.append(
+            {
+                "order_no": row.get("odno", ""),
+                "symbol": row.get("pdno", ""),
+                "ordered_qty": Decimal(row.get("ord_qty", "0") or "0"),
+                "filled_qty": Decimal(row.get("tot_ccld_qty", "0") or "0"),
+                "avg_price": Decimal(row.get("avg_prvs", "0") or "0"),
+                "remaining_qty": Decimal(row.get("rmn_qty", "0") or "0"),
+            }
+        )
+    return executions
+
+
 class KoreaInvestmentBroker(BaseBroker):
     """한국투자증권 Broker 구현체"""
 
@@ -156,7 +178,6 @@ class KoreaInvestmentBroker(BaseBroker):
         ord_dvsn = "01" if price is None else "00"
         ord_unpr = "0" if price is None else str(int(price))
 
-        headers = {"tr_id": tr_id}
         payload = {
             "CANO": self.client.account.account_number[:8],
             "ACNT_PRDT_CD": self.client.account.account_number[8:]
@@ -166,6 +187,13 @@ class KoreaInvestmentBroker(BaseBroker):
             "ORD_DVSN": ord_dvsn,
             "ORD_QTY": str(int(quantity)),
             "ORD_UNPR": ord_unpr,
+        }
+
+        # KIS 주문 POST는 hashkey(본문 무결성) + custtype 헤더가 필요하다.
+        headers = {
+            "tr_id": tr_id,
+            "custtype": "P",
+            "hashkey": self.client.get_hashkey(payload),
         }
 
         response = self.client.request(
@@ -188,3 +216,49 @@ class KoreaInvestmentBroker(BaseBroker):
             error_message=error_message,
             raw_payload=data,
         )
+
+    def get_order_execution(
+        self,
+        order_no: str = "",
+        start_date: str = "",
+        end_date: str = "",
+    ) -> list[dict]:
+        """
+        주식 일별 주문체결 조회. order_no 지정 시 해당 주문의 체결 내역만 필터.
+
+        start_date/end_date(YYYYMMDD) 미지정 시 당일(KST)로 조회한다.
+        """
+        today = datetime.now(KST).strftime("%Y%m%d")
+        start_date = start_date or today
+        end_date = end_date or today
+
+        is_paper = self.client.account.account_type == Account.AccountType.PAPER
+        tr_id = "VTTC8001R" if is_paper else "TTTC8001R"
+
+        headers = {"tr_id": tr_id, "custtype": "P"}
+        params = {
+            "CANO": self.client.account.account_number[:8],
+            "ACNT_PRDT_CD": self.client.account.account_number[8:]
+            if len(self.client.account.account_number) > 8
+            else "01",
+            "INQR_STRT_DT": start_date,
+            "INQR_END_DT": end_date,
+            "SLL_BUY_DVSN_CD": "00",
+            "INQR_DVSN": "00",
+            "PDNO": "",
+            "CCLD_DVSN": "00",
+            "ORD_GNO_BRNO": "",
+            "ODNO": order_no,
+            "INQR_DVSN_3": "00",
+            "INQR_DVSN_1": "",
+            "CTX_AREA_FK100": "",
+            "CTX_AREA_NK100": "",
+        }
+
+        response = self.client.request(
+            method="GET",
+            path="/uapi/domestic-stock/v1/trading/inquire-daily-ccld",
+            headers=headers,
+            params=params,
+        )
+        return parse_executions(response.json())

@@ -12,6 +12,7 @@ from core.broker.kis.broker import KoreaInvestmentBroker
 
 User = get_user_model()
 
+
 class BrokerTestCase(TestCase):
     def setUp(self):
         self.user = User.objects.create_user(username="testuser", password="password")
@@ -32,7 +33,7 @@ class BrokerTestCase(TestCase):
         mock_response.json.return_value = {
             "access_token": "mocked_access_token",
             "expires_in": 86400,
-            "token_type": "Bearer"
+            "token_type": "Bearer",
         }
         mock_post.return_value = mock_response
 
@@ -48,15 +49,15 @@ class BrokerTestCase(TestCase):
     @patch("core.broker.kis.client.requests.request")
     def test_get_balance(self, mock_request, mock_post):
         # token mock
-        mock_post.return_value.json.return_value = {"access_token": "mock", "expires_in": 3600}
-        
+        mock_post.return_value.json.return_value = {
+            "access_token": "mock",
+            "expires_in": 3600,
+        }
+
         # balance mock
         mock_response = MagicMock()
         mock_response.json.return_value = {
-            "output2": [{
-                "dnca_tot_amt": "1000000",
-                "tot_evlu_amt": "1500000"
-            }]
+            "output2": [{"dnca_tot_amt": "1000000", "tot_evlu_amt": "1500000"}]
         }
         mock_request.return_value = mock_response
 
@@ -65,17 +66,22 @@ class BrokerTestCase(TestCase):
 
         self.assertEqual(balance.cash_balance, Decimal("1000000"))
         self.assertEqual(balance.total_asset_value, Decimal("1500000"))
-        
+
     @patch("core.broker.kis.client.requests.post")
     @patch("core.broker.kis.client.requests.request")
     def test_create_order(self, mock_request, mock_post):
-        mock_post.return_value.json.return_value = {"access_token": "mock", "expires_in": 3600}
-        
+        # requests.post는 토큰 발급과 hashkey 발급에 모두 쓰이므로 두 키를 함께 제공
+        mock_post.return_value.json.return_value = {
+            "access_token": "mock",
+            "expires_in": 3600,
+            "HASH": "hash123",
+        }
+
         mock_response = MagicMock()
         mock_response.json.return_value = {
             "rt_cd": "0",
             "msg1": "정상처리되었습니다.",
-            "output": {"ODNO": "987654321"}
+            "output": {"ODNO": "987654321"},
         }
         mock_request.return_value = mock_response
 
@@ -84,6 +90,10 @@ class BrokerTestCase(TestCase):
 
         self.assertTrue(order.success)
         self.assertEqual(order.order_id, "987654321")
+        # 주문 요청에 hashkey/custtype 헤더가 포함됐는지
+        sent_headers = mock_request.call_args[1]["headers"]
+        self.assertEqual(sent_headers["hashkey"], "hash123")
+        self.assertEqual(sent_headers["custtype"], "P")
 
 
 from core.broker.kis.broker import parse_minute_candles
@@ -93,20 +103,38 @@ class KISDataCollectionTestCase(TestCase):
     def setUp(self):
         self.user = User.objects.create_user(username="kisdata", password="pw")
         self.account = Account.objects.create(
-            user=self.user, broker=Account.Broker.KIS,
-            account_type=Account.AccountType.PAPER, account_number="1234567801",
-            name="A", app_key_encrypted="ak", app_secret_encrypted="sk",
+            user=self.user,
+            broker=Account.Broker.KIS,
+            account_type=Account.AccountType.PAPER,
+            account_number="1234567801",
+            name="A",
+            app_key_encrypted="ak",
+            app_secret_encrypted="sk",
         )
 
     def test_parse_minute_candles_ascending(self):
-        data = {"output2": [
-            {"stck_bsop_date": "20240102", "stck_cntg_hour": "090100",
-             "stck_oprc": "70000", "stck_hgpr": "70200", "stck_lwpr": "69900",
-             "stck_prpr": "70100", "cntg_vol": "1000"},
-            {"stck_bsop_date": "20240102", "stck_cntg_hour": "090000",
-             "stck_oprc": "69900", "stck_hgpr": "70000", "stck_lwpr": "69800",
-             "stck_prpr": "70000", "cntg_vol": "500"},
-        ]}
+        data = {
+            "output2": [
+                {
+                    "stck_bsop_date": "20240102",
+                    "stck_cntg_hour": "090100",
+                    "stck_oprc": "70000",
+                    "stck_hgpr": "70200",
+                    "stck_lwpr": "69900",
+                    "stck_prpr": "70100",
+                    "cntg_vol": "1000",
+                },
+                {
+                    "stck_bsop_date": "20240102",
+                    "stck_cntg_hour": "090000",
+                    "stck_oprc": "69900",
+                    "stck_hgpr": "70000",
+                    "stck_lwpr": "69800",
+                    "stck_prpr": "70000",
+                    "cntg_vol": "500",
+                },
+            ]
+        }
         candles = parse_minute_candles(data)
         self.assertEqual(len(candles), 2)
         # 오름차순 정렬: 09:00 먼저
@@ -127,12 +155,62 @@ class KISDataCollectionTestCase(TestCase):
     @patch("core.broker.kis.client.requests.post")
     @patch("core.broker.kis.client.requests.request")
     def test_get_minute_candles(self, mock_request, mock_post):
-        mock_post.return_value.json.return_value = {"access_token": "t", "expires_in": 3600}
-        mock_request.return_value.json.return_value = {"output2": [
-            {"stck_bsop_date": "20240102", "stck_cntg_hour": "090000",
-             "stck_oprc": "69900", "stck_hgpr": "70000", "stck_lwpr": "69800",
-             "stck_prpr": "70000", "cntg_vol": "500"},
-        ]}
+        mock_post.return_value.json.return_value = {
+            "access_token": "t",
+            "expires_in": 3600,
+        }
+        mock_request.return_value.json.return_value = {
+            "output2": [
+                {
+                    "stck_bsop_date": "20240102",
+                    "stck_cntg_hour": "090000",
+                    "stck_oprc": "69900",
+                    "stck_hgpr": "70000",
+                    "stck_lwpr": "69800",
+                    "stck_prpr": "70000",
+                    "cntg_vol": "500",
+                },
+            ]
+        }
         candles = KoreaInvestmentBroker(self.account).get_minute_candles("005930")
         self.assertEqual(len(candles), 1)
         self.assertEqual(candles[0]["close"], Decimal("70000"))
+
+
+from core.broker.kis.broker import parse_executions
+
+
+class KISOrderExecutionTestCase(TestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(username="kisord", password="pw")
+        self.account = Account.objects.create(
+            user=self.user, broker=Account.Broker.KIS,
+            account_type=Account.AccountType.PAPER, account_number="1234567801",
+            name="A", app_key_encrypted="ak", app_secret_encrypted="sk",
+        )
+
+    def test_parse_executions(self):
+        data = {"output1": [
+            {"odno": "987654321", "pdno": "005930", "ord_qty": "10",
+             "tot_ccld_qty": "7", "avg_prvs": "70050", "rmn_qty": "3"},
+        ]}
+        execs = parse_executions(data)
+        self.assertEqual(len(execs), 1)
+        self.assertEqual(execs[0]["order_no"], "987654321")
+        self.assertEqual(execs[0]["filled_qty"], Decimal("7"))
+        self.assertEqual(execs[0]["avg_price"], Decimal("70050"))
+        self.assertEqual(execs[0]["remaining_qty"], Decimal("3"))
+
+    @patch("core.broker.kis.client.requests.post")
+    @patch("core.broker.kis.client.requests.request")
+    def test_get_order_execution(self, mock_request, mock_post):
+        mock_post.return_value.json.return_value = {"access_token": "t", "expires_in": 3600}
+        mock_request.return_value.json.return_value = {"output1": [
+            {"odno": "987654321", "pdno": "005930", "ord_qty": "10",
+             "tot_ccld_qty": "10", "avg_prvs": "70000", "rmn_qty": "0"},
+        ]}
+        execs = KoreaInvestmentBroker(self.account).get_order_execution(order_no="987654321")
+        self.assertEqual(len(execs), 1)
+        self.assertEqual(execs[0]["filled_qty"], Decimal("10"))
+        # 조회 파라미터에 주문번호가 실렸는지
+        self.assertEqual(mock_request.call_args[1]["params"]["ODNO"], "987654321")
