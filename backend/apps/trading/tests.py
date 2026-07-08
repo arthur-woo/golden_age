@@ -385,6 +385,46 @@ class TradingPipelineTestCase(TestCase):
         self.assertEqual(dec.target_quantity, Decimal("5"))  # 유동성 상한 지배
         self.assertEqual(Order.objects.first().quantity, Decimal("5"))
 
+    @patch("core.pipeline.trader_executor.get_broker_for_account")
+    @patch("core.pipeline.account_executor.get_broker_for_account")
+    def test_risk_guard_blocks_oversized_buy(self, mock_acc, mock_trd):
+        """종목당 노출 상한(기본 20%)을 초과하는 큰 진입은 리스크 가드가 BUY를 차단한다."""
+        self.trader.position_size_ratio = Decimal("0.5")
+        self.trader.max_exposure_ratio = Decimal("0.5")
+        self.trader.save(update_fields=["position_size_ratio", "max_exposure_ratio"])
+
+        broker = MagicMock()
+        bal = MagicMock()
+        bal.cash_balance = Decimal("10000000")
+        bal.total_asset_value = Decimal("10000000")
+        bal.raw_payload = {}
+        broker.get_balance.return_value = bal
+        price = MagicMock()
+        price.price = Decimal("70000")
+        broker.get_current_price.return_value = price
+        ores = MagicMock()
+        ores.success = True
+        ores.order_id = "O"
+        ores.raw_payload = {}
+        broker.create_order.return_value = ores
+        mock_acc.return_value = broker
+        mock_trd.return_value = broker
+
+        TraderStrategy.objects.create(
+            trader=self.trader,
+            strategy_version=self.strategy_version,
+            slot=TraderStrategy.Slot.FIRST,
+            weight=Decimal("1.0"),
+            config_payload={"action": "BUY", "confidence_score": "0.8"},
+            is_active=True,
+        )
+        execute_account_run(self.account.id)
+
+        dec = DecisionLog.objects.first()
+        self.assertEqual(dec.final_action, DecisionLog.FinalAction.HOLD)
+        self.assertIn("[Risk Guard]", dec.reason)
+        self.assertEqual(Order.objects.count(), 0)
+
 
 class StrategyIsolationTestCase(TestCase):
     """개발자별(Hong/Kim) 격리 전략이 StrategyRunner로 로딩되어 결정적으로 동작하는지 검증."""
@@ -564,31 +604,44 @@ class BacktestReconciliationTestCase(TestCase):
     def setUp(self):
         self.user = User.objects.create_user(username="recon", password="pw")
         self.account = Account.objects.create(
-            user=self.user, broker=Account.Broker.KIS,
-            account_type=Account.AccountType.PAPER, account_number="222",
-            name="Recon", app_key_encrypted="k", app_secret_encrypted="s",
+            user=self.user,
+            broker=Account.Broker.KIS,
+            account_type=Account.AccountType.PAPER,
+            account_number="222",
+            name="Recon",
+            app_key_encrypted="k",
+            app_secret_encrypted="s",
         )
         self.stock = Stock.objects.create(
             market=Stock.Market.KOSPI, symbol="005930", name="삼성전자"
         )
         self.trader = Trader.objects.create(
-            account=self.account, name="Bot", code="BOT",
-            position_size_ratio=Decimal("0.1"), entry_threshold=Decimal("0.5"),
-            stop_loss_ratio=Decimal("0.05"), take_profit_ratio=Decimal("0.1"),
+            account=self.account,
+            name="Bot",
+            code="BOT",
+            position_size_ratio=Decimal("0.1"),
+            entry_threshold=Decimal("0.5"),
+            stop_loss_ratio=Decimal("0.05"),
+            take_profit_ratio=Decimal("0.1"),
             max_exposure_ratio=Decimal("0.3"),
         )
         strategy = Strategy.objects.create(
             owner=self.user, namespace="tester", name="Mock", code="MOCK"
         )
         self.sv = StrategyVersion.objects.create(
-            strategy=strategy, version="v1.0.0",
-            module_path="apps.trading.tests", class_name="MockStrategy",
+            strategy=strategy,
+            version="v1.0.0",
+            module_path="apps.trading.tests",
+            class_name="MockStrategy",
             status=StrategyVersion.Status.ACTIVE,
         )
         TraderStrategy.objects.create(
-            trader=self.trader, strategy_version=self.sv,
-            slot=TraderStrategy.Slot.FIRST, weight=Decimal("1.0"),
-            config_payload={"action": "BUY", "confidence_score": "0.8"}, is_active=True,
+            trader=self.trader,
+            strategy_version=self.sv,
+            slot=TraderStrategy.Slot.FIRST,
+            weight=Decimal("1.0"),
+            config_payload={"action": "BUY", "confidence_score": "0.8"},
+            is_active=True,
         )
 
     def test_fill_matches_cost_model(self):
@@ -601,12 +654,16 @@ class BacktestReconciliationTestCase(TestCase):
         broker.set_market(self.stock.symbol, Decimal("70000"), Decimal("100000"))
 
         account_run = ExecutionRun.objects.create(
-            account=self.account, run_type=ExecutionRun.RunType.SCHEDULED,
-            status=ExecutionRun.Status.RUNNING, started_at=timezone.now(),
+            account=self.account,
+            run_type=ExecutionRun.RunType.SCHEDULED,
+            status=ExecutionRun.Status.RUNNING,
+            started_at=timezone.now(),
         )
         trader_run = TraderExecutionRun.objects.create(
-            account_run=account_run, trader=self.trader,
-            status=TraderExecutionRun.Status.RUNNING, started_at=timezone.now(),
+            account_run=account_run,
+            trader=self.trader,
+            status=TraderExecutionRun.Status.RUNNING,
+            started_at=timezone.now(),
         )
 
         with patch(
@@ -639,7 +696,9 @@ class ProbeStrategy:
 
     def run(self, stock, candles, regime_snapshot):
         ProbeStrategy.seen.append(len(candles))
-        return StrategyResult(action="HOLD", confidence_score=Decimal("0"), reason="probe")
+        return StrategyResult(
+            action="HOLD", confidence_score=Decimal("0"), reason="probe"
+        )
 
 
 class MultiBarBacktestTestCase(TestCase):
@@ -650,9 +709,13 @@ class MultiBarBacktestTestCase(TestCase):
 
         self.user = User.objects.create_user(username="mb", password="pw")
         self.account = Account.objects.create(
-            user=self.user, broker=Account.Broker.KIS,
-            account_type=Account.AccountType.PAPER, account_number="333",
-            name="MB", app_key_encrypted="k", app_secret_encrypted="s",
+            user=self.user,
+            broker=Account.Broker.KIS,
+            account_type=Account.AccountType.PAPER,
+            account_number="333",
+            name="MB",
+            app_key_encrypted="k",
+            app_secret_encrypted="s",
         )
         self.stock = Stock.objects.create(
             market=Stock.Market.KOSPI, symbol="005930", name="삼성전자"
@@ -661,16 +724,24 @@ class MultiBarBacktestTestCase(TestCase):
         self.prices = [70000 + i * 100 for i in range(10)]
         for i, price in enumerate(self.prices):
             Candle.objects.create(
-                stock=self.stock, timeframe=Candle.Timeframe.MIN_1,
+                stock=self.stock,
+                timeframe=Candle.Timeframe.MIN_1,
                 opened_at=self.base + timedelta(minutes=i),
-                open_price=Decimal(str(price)), high_price=Decimal(str(price)),
-                low_price=Decimal(str(price)), close_price=Decimal(str(price)),
-                volume=Decimal("100000"), source="test",
+                open_price=Decimal(str(price)),
+                high_price=Decimal(str(price)),
+                low_price=Decimal(str(price)),
+                close_price=Decimal(str(price)),
+                volume=Decimal("100000"),
+                source="test",
             )
         self.trader = Trader.objects.create(
-            account=self.account, name="Bot", code="BOT",
-            position_size_ratio=Decimal("0.1"), entry_threshold=Decimal("0.5"),
-            stop_loss_ratio=Decimal("0.05"), take_profit_ratio=Decimal("0.1"),
+            account=self.account,
+            name="Bot",
+            code="BOT",
+            position_size_ratio=Decimal("0.1"),
+            entry_threshold=Decimal("0.5"),
+            stop_loss_ratio=Decimal("0.05"),
+            take_profit_ratio=Decimal("0.1"),
             max_exposure_ratio=Decimal("0.3"),
             config_payload={"candle_timeframe": "1m"},
         )
@@ -680,14 +751,19 @@ class MultiBarBacktestTestCase(TestCase):
 
     def _attach(self, class_name, cfg):
         sv = StrategyVersion.objects.create(
-            strategy=self.strategy, version=f"v-{class_name}",
-            module_path="apps.trading.tests", class_name=class_name,
+            strategy=self.strategy,
+            version=f"v-{class_name}",
+            module_path="apps.trading.tests",
+            class_name=class_name,
             status=StrategyVersion.Status.ACTIVE,
         )
         TraderStrategy.objects.create(
-            trader=self.trader, strategy_version=sv,
-            slot=TraderStrategy.Slot.FIRST, weight=Decimal("1.0"),
-            config_payload=cfg, is_active=True,
+            trader=self.trader,
+            strategy_version=sv,
+            slot=TraderStrategy.Slot.FIRST,
+            weight=Decimal("1.0"),
+            config_payload=cfg,
+            is_active=True,
         )
 
     def test_no_lookahead_candle_counts(self):
@@ -712,11 +788,12 @@ class MultiBarBacktestTestCase(TestCase):
 
         self._attach("MockStrategy", {"action": "BUY", "confidence_score": "0.8"})
         bars = [
-            (self.base + timedelta(minutes=i), self.prices[i], 100000)
-            for i in range(5)
+            (self.base + timedelta(minutes=i), self.prices[i], 100000) for i in range(5)
         ]
         result = run_trader_backtest(self.trader, self.stock, bars, Decimal("10000000"))
 
         self.assertGreater(Order.objects.filter(account=self.account).count(), 0)
-        self.assertGreater(result["positions"].get(self.stock.symbol, Decimal("0")), Decimal("0"))
+        self.assertGreater(
+            result["positions"].get(self.stock.symbol, Decimal("0")), Decimal("0")
+        )
         self.assertLess(result["cash"], Decimal("10000000"))  # 매수+비용으로 현금 감소

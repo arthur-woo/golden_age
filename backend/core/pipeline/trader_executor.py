@@ -20,6 +20,7 @@ from core.pipeline.strategy_runner import StrategyRunner
 from core.ml.filter import MLFilterEngine
 from core.features.builder import build_features
 from core.risk.sizing import SizingConfig, compute_position_size
+from core.risk.guard import PortfolioState, RiskLimits, can_open_new_position
 from core.backtest.costs import round_trip_cost_ratio
 
 logger = logging.getLogger(__name__)
@@ -70,6 +71,29 @@ def get_position_info(account: Account, stock: Stock) -> Tuple[Decimal, Decimal]
 
     avg_price = total_cost / qty if qty > 0 else Decimal("0.0")
     return qty, avg_price
+
+
+def get_open_position_count(account: Account) -> int:
+    """계좌에서 현재 순보유(잔량>0)인 종목 수를 반환한다."""
+    from django.db.models import Sum
+
+    rows = (
+        PositionLedger.objects.filter(account=account)
+        .values("stock")
+        .annotate(qty=Sum("quantity_delta"))
+    )
+    return sum(1 for r in rows if r["qty"] and r["qty"] > 0)
+
+
+def _risk_limits(trader: Trader) -> RiskLimits:
+    """Trader.config_payload['risk_limits']로 한도를 오버라이드(없으면 기본값)."""
+    cfg = (trader.config_payload or {}).get("risk_limits", {})
+    return RiskLimits(
+        max_gross_exposure_ratio=float(cfg.get("max_gross_exposure_ratio", 1.0)),
+        max_positions=int(cfg.get("max_positions", 10)),
+        max_position_ratio=float(cfg.get("max_position_ratio", 0.2)),
+        daily_loss_limit_ratio=float(cfg.get("daily_loss_limit_ratio", 0.03)),
+    )
 
 
 def compute_target_buy_qty(
@@ -339,6 +363,34 @@ def execute_trader_for_stock(
                 f"[ML Filter] 통과 (리스크: {ml_output.risk_score}, 성공확률: {ml_output.trade_probability})"
             )
 
+    # 6-1. 리스크 가드: 신규 진입(BUY) 규모가 포트폴리오 한도를 넘으면 차단
+    intended_qty = Decimal("0")
+    if final_action == DecisionLog.FinalAction.BUY:
+        intended_qty = compute_target_buy_qty(
+            trader=trader,
+            total_asset_value=total_asset_value,
+            current_price=current_price,
+            adjusted_position_size=adjusted_position_size,
+            weighted_score_sum=weighted_score_sum,
+            feature_snapshot=feature_snapshot,
+            ml_output=ml_output,
+            candles=candles,
+        )
+        portfolio = PortfolioState(
+            equity=float(total_asset_value),
+            gross_exposure=float(total_asset_value - cash_balance),
+            num_positions=get_open_position_count(account),
+            day_pnl=0.0,  # TODO: 일중 손익 피드 연결 시 킬스위치 활성화
+        )
+        guard = can_open_new_position(
+            portfolio,
+            float(intended_qty) * float(current_price),
+            _risk_limits(trader),
+        )
+        if not guard.allowed:
+            final_action = DecisionLog.FinalAction.HOLD
+            reason_parts.append(f"[Risk Guard] {guard.reason}")
+
     # 7. 최종 결정 의사록 작성
     decision_reason = " | ".join(reason_parts)
     decision = DecisionLog.objects.create(
@@ -364,16 +416,7 @@ def execute_trader_for_stock(
 
     # 8. 주문 집행 및 체결 시뮬레이션/기록 (Atomic 트랜잭션 사용)
     if final_action == DecisionLog.FinalAction.BUY:
-        target_qty = compute_target_buy_qty(
-            trader=trader,
-            total_asset_value=total_asset_value,
-            current_price=current_price,
-            adjusted_position_size=adjusted_position_size,
-            weighted_score_sum=weighted_score_sum,
-            feature_snapshot=feature_snapshot,
-            ml_output=ml_output,
-            candles=candles,
-        )
+        target_qty = intended_qty  # 6-1에서 계산한 목표 수량 재사용
 
         if target_qty > current_qty:
             qty_to_buy = target_qty - current_qty
