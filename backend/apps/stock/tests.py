@@ -66,3 +66,58 @@ class UniverseMembershipTestCase(TestCase):
         at = datetime(2023, 4, 1, tzinfo=dt_timezone.utc)
         ids = get_universe_stock_ids("KOSPI200", at=at)
         self.assertNotIn(self.c.id, ids)
+
+
+from django.test import SimpleTestCase
+from core.universe.filter import (
+    CandidateConfig,
+    StockSnapshot,
+    is_entry_window,
+    passes_filters,
+    select_candidates,
+)
+
+
+def _snap(sid, score=0.0, turnover=2e8, recent_volume=1000.0, vol=0.002,
+          spread=10.0, halted=False):
+    return StockSnapshot(
+        stock_id=sid, turnover=turnover, recent_volume=recent_volume,
+        volatility=vol, score=score, spread_bps=spread, halted=halted,
+    )
+
+
+class CandidateFilterTestCase(SimpleTestCase):
+    def setUp(self):
+        self.cfg = CandidateConfig()
+
+    def test_default_passes(self):
+        self.assertTrue(passes_filters(_snap(1), self.cfg))
+
+    def test_halted_excluded(self):
+        self.assertFalse(passes_filters(_snap(1, halted=True), self.cfg))
+
+    def test_low_turnover_excluded(self):
+        self.assertFalse(passes_filters(_snap(1, turnover=1e7), self.cfg))
+
+    def test_wide_spread_excluded(self):
+        self.assertFalse(passes_filters(_snap(1, spread=100.0), self.cfg))
+
+    def test_out_of_band_volatility_excluded(self):
+        self.assertFalse(passes_filters(_snap(1, vol=0.05), self.cfg))   # 너무 높음
+        self.assertFalse(passes_filters(_snap(1, vol=0.0001), self.cfg))  # 너무 낮음
+
+    def test_select_ranks_and_limits_top_k(self):
+        snaps = [_snap(10, score=1.0), _snap(20, score=3.0), _snap(30, score=2.0)]
+        cfg = CandidateConfig(top_k=2)
+        self.assertEqual(select_candidates(snaps, cfg), [20, 30])  # score 내림차순 top2
+
+    def test_entry_window_gating(self):
+        snaps = [_snap(10, score=1.0)]
+        self.assertEqual(select_candidates(snaps, self.cfg, minutes_since_open=2), [])    # 개장 초
+        self.assertEqual(select_candidates(snaps, self.cfg, minutes_since_open=380), [])  # 종가 근접
+        self.assertEqual(select_candidates(snaps, self.cfg, minutes_since_open=100), [10])
+
+    def test_is_entry_window(self):
+        self.assertTrue(is_entry_window(None, self.cfg))
+        self.assertFalse(is_entry_window(0, self.cfg))
+        self.assertTrue(is_entry_window(100, self.cfg))
