@@ -311,3 +311,46 @@ class KISRealtimeAdapterTestCase(TestCase):
         self.assertEqual(c0.open_price, Decimal("70000"))
         self.assertEqual(c0.close_price, Decimal("70100"))
         self.assertEqual(c0.volume, Decimal("15"))
+
+
+class BackfillCommandTestCase(TestCase):
+    def test_backfill_persists_candles(self):
+        from django.contrib.auth import get_user_model
+        from apps.account.models import Account
+        from core.broker.kis.realtime import KST as _KST
+        from unittest.mock import patch as _patch
+
+        user = get_user_model().objects.create_user("bf", password="pw")
+        account = Account.objects.create(
+            user=user, broker=Account.Broker.KIS,
+            account_type=Account.AccountType.PAPER, account_number="1234567801",
+            name="A", app_key_encrypted="k", app_secret_encrypted="s",
+        )
+        Stock.objects.create(market=Stock.Market.KOSPI, symbol="005930", name="삼성전자")
+
+        parsed = [
+            {"opened_at": datetime(2024, 1, 2, 9, 0, tzinfo=_KST),
+             "open": Decimal("69900"), "high": Decimal("70000"), "low": Decimal("69800"),
+             "close": Decimal("70000"), "volume": Decimal("500")},
+            {"opened_at": datetime(2024, 1, 2, 9, 1, tzinfo=_KST),
+             "open": Decimal("70000"), "high": Decimal("70200"), "low": Decimal("69900"),
+             "close": Decimal("70100"), "volume": Decimal("1000")},
+        ]
+        with _patch(
+            "core.broker.kis.broker.KoreaInvestmentBroker.get_minute_candles",
+            return_value=parsed,
+        ):
+            call_command(
+                "backfill_candles", "--account-id", str(account.id),
+                "--symbol", "005930", "--pages", "1", stdout=StringIO(),
+            )
+        self.assertEqual(Candle.objects.filter(source="kis_rest").count(), 2)
+
+
+class KISSubscribeFrameTestCase(SimpleTestCase):
+    def test_subscribe_frame(self):
+        frame = KISRealtimeAdapter.subscribe_frame("AK123", "005930")
+        self.assertEqual(frame["header"]["approval_key"], "AK123")
+        self.assertEqual(frame["header"]["custtype"], "P")
+        self.assertEqual(frame["body"]["input"]["tr_id"], "H0STCNT0")
+        self.assertEqual(frame["body"]["input"]["tr_key"], "005930")

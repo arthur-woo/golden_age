@@ -12,6 +12,7 @@ dependencies = [
     "django-q2>=1.7",
     "lightgbm>=4.0",
     "numpy>=1.26",
+    "websocket-client>=1.7",
 ]
 
 [tool.uv]

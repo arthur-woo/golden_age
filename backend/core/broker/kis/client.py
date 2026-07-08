@@ -17,7 +17,11 @@ class KISClient:
 
     def __init__(self, account: Account):
         self.account = account
-        self.base_url = self.LIVE_BASE_URL if account.account_type == Account.AccountType.LIVE else self.PAPER_BASE_URL
+        self.base_url = (
+            self.LIVE_BASE_URL
+            if account.account_type == Account.AccountType.LIVE
+            else self.PAPER_BASE_URL
+        )
 
     def _get_app_key(self) -> str:
         # 실제로는 암호화 해제 로직 적용 (현재는 그대로 반환으로 임시 구현)
@@ -31,11 +35,15 @@ class KISClient:
         유효한 Access Token 반환
         만료된 경우 자동으로 재발급 후 DB에 저장
         """
-        valid_token = self.account.tokens.filter(
-            token_type="Bearer",
-            revoked_at__isnull=True,
-            expires_at__gt=timezone.now()
-        ).order_by("-expires_at").first()
+        valid_token = (
+            self.account.tokens.filter(
+                token_type="Bearer",
+                revoked_at__isnull=True,
+                expires_at__gt=timezone.now(),
+            )
+            .order_by("-expires_at")
+            .first()
+        )
 
         if valid_token:
             return valid_token.access_token_encrypted
@@ -48,10 +56,10 @@ class KISClient:
         payload = {
             "grant_type": "client_credentials",
             "appkey": self._get_app_key(),
-            "appsecret": self._get_app_secret()
+            "appsecret": self._get_app_secret(),
         }
         headers = {"content-type": "application/json"}
-        
+
         response = requests.post(url, json=payload, headers=headers)
         response.raise_for_status()
         data = response.json()
@@ -70,19 +78,48 @@ class KISClient:
 
         return access_token
 
-    def request(self, method: str, path: str, headers: dict = None, **kwargs) -> requests.Response:
+    def get_approval_key(self) -> str:
+        """실시간(WebSocket) 접속용 approval_key 발급"""
+        url = f"{self.base_url}/oauth2/Approval"
+        payload = {
+            "grant_type": "client_credentials",
+            "appkey": self._get_app_key(),
+            "secretkey": self._get_app_secret(),
+        }
+        headers = {"content-type": "application/json"}
+        response = requests.post(url, json=payload, headers=headers)
+        response.raise_for_status()
+        return response.json()["approval_key"]
+
+    def get_hashkey(self, body: dict) -> str:
+        """주문 등 POST 본문 무결성 검증용 hashkey 발급"""
+        url = f"{self.base_url}/uapi/hashkey"
+        headers = {
+            "content-type": "application/json",
+            "appkey": self._get_app_key(),
+            "appsecret": self._get_app_secret(),
+        }
+        response = requests.post(url, json=body, headers=headers)
+        response.raise_for_status()
+        return response.json()["HASH"]
+
+    def request(
+        self, method: str, path: str, headers: dict = None, **kwargs
+    ) -> requests.Response:
         """인증이 포함된 HTTP 요청 수행"""
         if headers is None:
             headers = {}
 
-        headers.update({
-            "authorization": f"Bearer {self.get_access_token()}",
-            "appkey": self._get_app_key(),
-            "appsecret": self._get_app_secret(),
-        })
+        headers.update(
+            {
+                "authorization": f"Bearer {self.get_access_token()}",
+                "appkey": self._get_app_key(),
+                "appsecret": self._get_app_secret(),
+            }
+        )
 
         url = f"{self.base_url}{path}"
         response = requests.request(method, url, headers=headers, **kwargs)
-        
+
         # 만료 등에 대한 공통 예외 처리 추가 가능
         return response

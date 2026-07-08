@@ -41,6 +41,7 @@ class Command(BaseCommand):
         parser.add_argument("--source", default="kis_ws")
         parser.add_argument("--demo", action="store_true", help="합성 틱으로 파이프라인 검증")
         parser.add_argument("--demo-minutes", type=int, default=3)
+        parser.add_argument("--account-id", type=int, help="실시간 모드 인증에 사용할 계좌 id")
 
     def handle(self, *args, **opts):
         try:
@@ -57,6 +58,16 @@ class Command(BaseCommand):
             self.stdout.write(self.style.SUCCESS(f"합성 수집 완료: {total}개 캔들 적재"))
             return
 
-        raise CommandError(
-            "실시간 수집은 KIS WebSocket 어댑터 연결이 필요합니다. " "우선 --demo 로 수집 파이프라인을 검증하세요."
-        )
+        if not opts.get("account_id"):
+            raise CommandError("실시간 모드에는 --account-id 가 필요합니다. (검증은 --demo 사용)")
+        from apps.account.models import Account
+        from core.broker.kis.realtime import KISRealtimeAdapter
+
+        try:
+            account = Account.objects.get(id=opts["account_id"])
+        except Account.DoesNotExist:
+            raise CommandError(f"계좌를 찾을 수 없습니다: id={opts['account_id']}")
+
+        adapter = KISRealtimeAdapter(account, collector=collector)
+        self.stdout.write("KIS 실시간 접속 시작... (Ctrl+C로 종료)")
+        adapter.connect_and_run([opts["symbol"]])

@@ -133,15 +133,69 @@ class KISRealtimeAdapter:
             self.ticks_from_messages(message_source), finalize=finalize
         )
 
-    # --- 실 접속(문서화된 연결 지점, 네트워크/인증 필요) ---
+    def _ws_url(self) -> str:
+        from apps.account.models import Account
+
+        return (
+            self.PAPER_WS_URL
+            if self.account.account_type == Account.AccountType.PAPER
+            else self.LIVE_WS_URL
+        )
+
+    @staticmethod
+    def subscribe_frame(approval_key: str, symbol: str) -> dict:
+        """H0STCNT0(체결가) 구독 프레임을 생성한다."""
+        return {
+            "header": {
+                "approval_key": approval_key,
+                "custtype": "P",
+                "tr_type": "1",  # 1: 등록
+                "content-type": "utf-8",
+            },
+            "body": {"input": {"tr_id": REALTIME_TRADE_TR_ID, "tr_key": symbol}},
+        }
+
+    def _handle_control(self, ws, raw: str) -> None:  # pragma: no cover
+        """제어 프레임(JSON) 처리. PINGPONG은 그대로 되돌려준다."""
+        import json
+
+        try:
+            msg = json.loads(raw)
+        except (ValueError, TypeError):
+            return
+        if msg.get("header", {}).get("tr_id") == "PINGPONG":
+            ws.send(raw)
+
+    # --- 실 접속(네트워크/인증 필요, 실계정 검증은 사용자 몫) ---
     def connect_and_run(self, symbols: list[str]):  # pragma: no cover
         """
-        실 WebSocket에 접속하여 symbols를 구독하고 run()으로 수집한다.
+        실 WebSocket에 접속하여 symbols를 구독하고 완성된 1분봉을 적재한다.
 
-        websocket-client 등 WS 라이브러리와 approval_key(REST /oauth2/Approval)가 필요하다.
-        운영 배포 시 구현한다.
+        approval_key(REST /oauth2/Approval) + websocket-client가 필요하다.
         """
-        raise NotImplementedError(
-            "실 WebSocket 접속은 WS 라이브러리와 approval_key 발급 연결이 필요합니다. "
-            "테스트/리플레이에는 run(message_source)를 사용하세요."
-        )
+        import json
+
+        try:
+            import websocket  # websocket-client
+        except ImportError as e:
+            raise RuntimeError(
+                "websocket-client 패키지가 필요합니다: uv add websocket-client"
+            ) from e
+
+        from core.broker.kis.client import KISClient
+
+        approval_key = KISClient(self.account).get_approval_key()
+        ws = websocket.create_connection(self._ws_url())
+        try:
+            for symbol in symbols:
+                ws.send(json.dumps(self.subscribe_frame(approval_key, symbol)))
+            while True:
+                raw = ws.recv()
+                if not raw:
+                    continue
+                if raw[0] in ("0", "1"):  # 실시간 데이터 프레임
+                    self.run([raw], finalize=False)
+                else:  # 제어 프레임(구독 응답/PINGPONG)
+                    self._handle_control(ws, raw)
+        finally:
+            ws.close()

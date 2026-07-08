@@ -84,3 +84,55 @@ class BrokerTestCase(TestCase):
 
         self.assertTrue(order.success)
         self.assertEqual(order.order_id, "987654321")
+
+
+from core.broker.kis.broker import parse_minute_candles
+
+
+class KISDataCollectionTestCase(TestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(username="kisdata", password="pw")
+        self.account = Account.objects.create(
+            user=self.user, broker=Account.Broker.KIS,
+            account_type=Account.AccountType.PAPER, account_number="1234567801",
+            name="A", app_key_encrypted="ak", app_secret_encrypted="sk",
+        )
+
+    def test_parse_minute_candles_ascending(self):
+        data = {"output2": [
+            {"stck_bsop_date": "20240102", "stck_cntg_hour": "090100",
+             "stck_oprc": "70000", "stck_hgpr": "70200", "stck_lwpr": "69900",
+             "stck_prpr": "70100", "cntg_vol": "1000"},
+            {"stck_bsop_date": "20240102", "stck_cntg_hour": "090000",
+             "stck_oprc": "69900", "stck_hgpr": "70000", "stck_lwpr": "69800",
+             "stck_prpr": "70000", "cntg_vol": "500"},
+        ]}
+        candles = parse_minute_candles(data)
+        self.assertEqual(len(candles), 2)
+        # 오름차순 정렬: 09:00 먼저
+        self.assertEqual(candles[0]["opened_at"].minute, 0)
+        self.assertEqual(candles[0]["close"], Decimal("70000"))
+        self.assertEqual(candles[1]["opened_at"].minute, 1)
+        self.assertEqual(candles[1]["volume"], Decimal("1000"))
+
+    @patch("core.broker.kis.client.requests.post")
+    def test_get_approval_key(self, mock_post):
+        mock_post.return_value.json.return_value = {"approval_key": "AK123"}
+        key = KISClient(self.account).get_approval_key()
+        self.assertEqual(key, "AK123")
+        url, kwargs = mock_post.call_args[0][0], mock_post.call_args[1]
+        self.assertIn("/oauth2/Approval", url)
+        self.assertEqual(kwargs["json"]["secretkey"], "sk")
+
+    @patch("core.broker.kis.client.requests.post")
+    @patch("core.broker.kis.client.requests.request")
+    def test_get_minute_candles(self, mock_request, mock_post):
+        mock_post.return_value.json.return_value = {"access_token": "t", "expires_in": 3600}
+        mock_request.return_value.json.return_value = {"output2": [
+            {"stck_bsop_date": "20240102", "stck_cntg_hour": "090000",
+             "stck_oprc": "69900", "stck_hgpr": "70000", "stck_lwpr": "69800",
+             "stck_prpr": "70000", "cntg_vol": "500"},
+        ]}
+        candles = KoreaInvestmentBroker(self.account).get_minute_candles("005930")
+        self.assertEqual(len(candles), 1)
+        self.assertEqual(candles[0]["close"], Decimal("70000"))
