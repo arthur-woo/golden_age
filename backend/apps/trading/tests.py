@@ -627,3 +627,96 @@ class BacktestReconciliationTestCase(TestCase):
         self.assertEqual(execution.tax_amount, Decimal("0"))  # 매수 무세금
         # 슬리피지로 체결가가 기준가보다 높다
         self.assertGreater(execution.executed_price, Decimal("70000"))
+
+
+class ProbeStrategy:
+    """look-ahead 검증용: 매 호출 시 받은 캔들 수를 기록하고 HOLD 반환."""
+
+    seen: list = []
+
+    def __init__(self, config):
+        self.config = config
+
+    def run(self, stock, candles, regime_snapshot):
+        ProbeStrategy.seen.append(len(candles))
+        return StrategyResult(action="HOLD", confidence_score=Decimal("0"), reason="probe")
+
+
+class MultiBarBacktestTestCase(TestCase):
+    """trader_executor 다봉 백테스트: as_of 필터가 미래 캔들을 차단하는지 검증."""
+
+    def setUp(self):
+        from datetime import datetime, timezone as dt_tz
+
+        self.user = User.objects.create_user(username="mb", password="pw")
+        self.account = Account.objects.create(
+            user=self.user, broker=Account.Broker.KIS,
+            account_type=Account.AccountType.PAPER, account_number="333",
+            name="MB", app_key_encrypted="k", app_secret_encrypted="s",
+        )
+        self.stock = Stock.objects.create(
+            market=Stock.Market.KOSPI, symbol="005930", name="삼성전자"
+        )
+        self.base = datetime(2024, 1, 2, 9, 0, tzinfo=dt_tz.utc)
+        self.prices = [70000 + i * 100 for i in range(10)]
+        for i, price in enumerate(self.prices):
+            Candle.objects.create(
+                stock=self.stock, timeframe=Candle.Timeframe.MIN_1,
+                opened_at=self.base + timedelta(minutes=i),
+                open_price=Decimal(str(price)), high_price=Decimal(str(price)),
+                low_price=Decimal(str(price)), close_price=Decimal(str(price)),
+                volume=Decimal("100000"), source="test",
+            )
+        self.trader = Trader.objects.create(
+            account=self.account, name="Bot", code="BOT",
+            position_size_ratio=Decimal("0.1"), entry_threshold=Decimal("0.5"),
+            stop_loss_ratio=Decimal("0.05"), take_profit_ratio=Decimal("0.1"),
+            max_exposure_ratio=Decimal("0.3"),
+            config_payload={"candle_timeframe": "1m"},
+        )
+        self.strategy = Strategy.objects.create(
+            owner=self.user, namespace="tester", name="Probe", code="PROBE"
+        )
+
+    def _attach(self, class_name, cfg):
+        sv = StrategyVersion.objects.create(
+            strategy=self.strategy, version=f"v-{class_name}",
+            module_path="apps.trading.tests", class_name=class_name,
+            status=StrategyVersion.Status.ACTIVE,
+        )
+        TraderStrategy.objects.create(
+            trader=self.trader, strategy_version=sv,
+            slot=TraderStrategy.Slot.FIRST, weight=Decimal("1.0"),
+            config_payload=cfg, is_active=True,
+        )
+
+    def test_no_lookahead_candle_counts(self):
+        from core.backtest.runner import run_trader_backtest
+
+        ProbeStrategy.seen = []
+        self._attach("ProbeStrategy", {})
+        bars = [
+            (self.base + timedelta(minutes=i), self.prices[i], 100000)
+            for i in range(10)
+        ]
+        result = run_trader_backtest(self.trader, self.stock, bars, Decimal("10000000"))
+
+        # 각 봉에서 as_of 이전 캔들만 → 1,2,...,10 (미래 미포함)
+        self.assertEqual(ProbeStrategy.seen, list(range(1, 11)))
+        self.assertEqual(result["num_bars"], 10)
+        # HOLD만 있었으므로 자본 변화 없음
+        self.assertEqual(result["final_equity"], Decimal("10000000"))
+
+    def test_buy_strategy_executes_over_bars(self):
+        from core.backtest.runner import run_trader_backtest
+
+        self._attach("MockStrategy", {"action": "BUY", "confidence_score": "0.8"})
+        bars = [
+            (self.base + timedelta(minutes=i), self.prices[i], 100000)
+            for i in range(5)
+        ]
+        result = run_trader_backtest(self.trader, self.stock, bars, Decimal("10000000"))
+
+        self.assertGreater(Order.objects.filter(account=self.account).count(), 0)
+        self.assertGreater(result["positions"].get(self.stock.symbol, Decimal("0")), Decimal("0"))
+        self.assertLess(result["cash"], Decimal("10000000"))  # 매수+비용으로 현금 감소

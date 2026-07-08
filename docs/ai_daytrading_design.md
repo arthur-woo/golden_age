@@ -337,7 +337,12 @@ schedule(
 - **#2 사이징 연결**: `trader_executor`가 `trader.config_payload.advanced_sizing=true`일 때 `core/risk/sizing.compute_position_size`(켈리·변동성·유동성)로 주문 수량 산정. 기본은 기존 비율(하위호환).
 - **#3 정합성**: `execute_order`가 브로커 체결가/수수료/세금(`OrderResultDTO.raw_payload`)을 반영 → `BacktestBroker` 구동 시 리서치 엔진과 **동일 비용 모델(estimate_fill)**로 체결 기록. 테스트로 체결가·비용 일치 검증.
 
+## 실운영 연결 (추가 완료)
+
+- **다봉 재현 백테스트**: `trader_executor`에 `as_of`(미래 캔들 차단)·`broker` 주입·`candle_timeframe` 설정을 추가하고 `core/backtest/runner.py::run_trader_backtest`로 1분봉 다봉 구동. 테스트로 look-ahead 미발생(봉별 가시 캔들 수 1→N) 검증.
+- **KIS WebSocket 어댑터**: `core/broker/kis/realtime.py`가 실시간 체결(H0STCNT0) 프레임을 파싱해 `RealtimeCollector`로 적재(`run(message_source)`). 파싱·수집 연결은 테스트 완료, 실 소켓 접속(`connect_and_run`)만 배포 시 연결.
+
 ## 남은 실운영 연결 작업(후속)
 
-- KIS **WebSocket 어댑터**: 실계정 체결 스트림 → `RealtimeCollector.ingest_tick` 연결(네트워크/인증 필요, 미검증 I/O)
-- **다봉 재현 백테스트**: `trader_executor`의 캔들 timeframe 하드코딩(`DAY_1`)을 일반화하여 1분봉 다봉 루프로 리서치 엔진과 자본곡선까지 대조
+- KIS **실 WebSocket 접속**(`connect_and_run`): WS 라이브러리(`websocket-client` 등)와 `approval_key`(REST `/oauth2/Approval`) 발급 배선 — 네트워크/인증 필요한 미검증 I/O
+- 리서치 엔진 ↔ 다봉 러너 **자본곡선 정량 대조**(TCA 리포트)
