@@ -30,7 +30,10 @@ DEFAULT_ML_MIN_TRADE_PROBABILITY = Decimal("0.5")
 
 
 def capture_feature_snapshot(
-    stock: Stock, candles: list, current_price: Decimal
+    stock: Stock,
+    candles: list,
+    current_price: Decimal,
+    timeframe: str = Candle.Timeframe.DAY_1,
 ) -> FeatureSnapshot:
     """
     현재 시점의 Feature 스냅샷을 mkt_feature_snapshot에 저장한다.
@@ -39,7 +42,7 @@ def capture_feature_snapshot(
     """
     return FeatureSnapshot.objects.create(
         stock=stock,
-        timeframe=Candle.Timeframe.DAY_1,
+        timeframe=timeframe,
         feature_payload=build_features(candles, float(current_price)),
         source_payload={"candle_count": len(candles)},
         captured_at=timezone.now(),
@@ -143,12 +146,17 @@ def execute_trader_for_stock(
     trader_run: TraderExecutionRun,
     stock: Stock,
     regime_snapshot: Optional[RegimeSnapshot] = None,
+    as_of=None,
+    broker=None,
 ):
     """
     특정 Trader가 특정 Stock에 대해 매매 전략을 평가하고 주문을 실행합니다.
+
+    as_of: 지정 시 그 시각 이전(포함) 캔들만 사용한다(백테스트 look-ahead 방지).
+    broker: 주입 시 그대로 사용한다(백테스트 BacktestBroker). 미주입 시 계좌 브로커.
     """
     account = trader.account
-    broker = get_broker_for_account(account)
+    broker = broker or get_broker_for_account(account)
 
     # 1. 현재 계좌 정보 및 종목 가격 정보 가져오기
     try:
@@ -193,17 +201,22 @@ def execute_trader_for_stock(
     reason_parts = []
     weighted_score_sum = Decimal("0.0")
 
-    # 100일간의 일봉 캔들 조회 (전략 분석 및 Feature 스냅샷 공용)
-    candles = list(
-        Candle.objects.filter(stock=stock, timeframe=Candle.Timeframe.DAY_1).order_by(
-            "-opened_at"
-        )[:100]
+    # 최근 100개 캔들 조회 (전략 분석 및 Feature 스냅샷 공용)
+    # timeframe은 Trader 설정에서 지정(기본 1일봉). as_of 지정 시 미래 캔들 차단(백테스트).
+    timeframe = (trader.config_payload or {}).get(
+        "candle_timeframe", Candle.Timeframe.DAY_1
     )
+    candle_qs = Candle.objects.filter(stock=stock, timeframe=timeframe)
+    if as_of is not None:
+        candle_qs = candle_qs.filter(opened_at__lte=as_of)
+    candles = list(candle_qs.order_by("-opened_at")[:100])
 
     # ML Filter가 활성화된 경우 현재 시점의 Feature 스냅샷을 캡처하여 저장
     feature_snapshot = None
     if trader.ml_filter_enabled:
-        feature_snapshot = capture_feature_snapshot(stock, candles, current_price)
+        feature_snapshot = capture_feature_snapshot(
+            stock, candles, current_price, timeframe
+        )
 
     # 4. 리스크 관리: 손절/익절 조건 체크 (포지션이 있는 경우 우선 처리)
     if current_qty > 0:

@@ -229,3 +229,85 @@ class CollectRealtimeCommandTestCase(TestCase):
             "--demo-minutes", "3", stdout=StringIO(),
         )
         self.assertEqual(Candle.objects.filter(source="kis_ws").count(), 3)
+
+
+from datetime import date
+from core.broker.kis.realtime import (
+    FIELDS_PER_RECORD,
+    KISRealtimeAdapter,
+    parse_realtime_message,
+)
+
+
+def _kis_frame(records, tr_id="H0STCNT0", encrypted="0"):
+    """H0STCNT0 프레임 합성. records: [(symbol, hhmmss, price, volume), ...]"""
+    all_fields = []
+    for symbol, hhmmss, price, volume in records:
+        rec = [""] * FIELDS_PER_RECORD
+        rec[0] = symbol
+        rec[1] = hhmmss
+        rec[2] = str(price)
+        rec[12] = str(volume)
+        all_fields += rec
+    return "|".join([encrypted, tr_id, str(len(records)), "^".join(all_fields)])
+
+
+class KISRealtimeParseTestCase(SimpleTestCase):
+    def test_parse_single_record(self):
+        frame = _kis_frame([("005930", "090001", 70000, 10)])
+        ticks = parse_realtime_message(frame, trade_date=date(2024, 1, 2))
+        self.assertEqual(len(ticks), 1)
+        t = ticks[0]
+        self.assertEqual(t.symbol, "005930")
+        self.assertEqual(t.price, Decimal("70000"))
+        self.assertEqual(t.volume, Decimal("10"))
+        self.assertEqual((t.ts.hour, t.ts.minute, t.ts.second), (9, 0, 1))
+
+    def test_parse_multi_record(self):
+        frame = _kis_frame([
+            ("005930", "090001", 70000, 10),
+            ("005930", "090002", 70100, 5),
+        ])
+        ticks = parse_realtime_message(frame, trade_date=date(2024, 1, 2))
+        self.assertEqual(len(ticks), 2)
+        self.assertEqual(ticks[1].price, Decimal("70100"))
+
+    def test_non_trade_tr_id_ignored(self):
+        frame = _kis_frame([("005930", "090001", 70000, 10)], tr_id="H0STASP0")
+        self.assertEqual(parse_realtime_message(frame), [])
+
+    def test_encrypted_raises(self):
+        frame = _kis_frame([("005930", "090001", 70000, 10)], encrypted="1")
+        with self.assertRaises(ValueError):
+            parse_realtime_message(frame)
+
+
+class KISRealtimeAdapterTestCase(TestCase):
+    def setUp(self):
+        self.account = None  # 어댑터는 run 경로에서 account를 쓰지 않음
+        self.stock = Stock.objects.create(
+            market=Stock.Market.KOSPI, symbol="005930", name="삼성전자"
+        )
+
+    def test_run_persists_candles(self):
+        from apps.account.models import Account
+        from django.contrib.auth import get_user_model
+
+        user = get_user_model().objects.create_user("kisu", password="pw")
+        account = Account.objects.create(
+            user=user, broker=Account.Broker.KIS,
+            account_type=Account.AccountType.PAPER, account_number="9",
+            name="A", app_key_encrypted="k", app_secret_encrypted="s",
+        )
+        adapter = KISRealtimeAdapter(account, trade_date=date(2024, 1, 2))
+        messages = [
+            _kis_frame([("005930", "090001", 70000, 10), ("005930", "090030", 70100, 5)]),
+            _kis_frame([("005930", "090105", 70200, 3)]),  # 다음 분 -> 9:00 확정
+        ]
+        total = adapter.run(messages, finalize=True)
+        self.assertEqual(Candle.objects.filter(stock=self.stock, source="kis_ws").count(), 2)
+        self.assertEqual(total, 2)
+        c0 = Candle.objects.get(stock=self.stock, opened_at__minute=0, source="kis_ws")
+        self.assertEqual(c0.open_price, Decimal("70000"))
+        self.assertEqual(c0.close_price, Decimal("70100"))
+        self.assertEqual(c0.volume, Decimal("15"))
