@@ -66,15 +66,39 @@ def _std(values: list[float]) -> float:
     return math.sqrt(var)
 
 
+def cross_sectional_rank(values: dict) -> dict:
+    """
+    같은 시점 유니버스 값들을 0~1 백분위 랭크로 변환한다(종목 간 스케일 제거).
+
+    values: {symbol: value}. 반환: {symbol: rank01}. 원소 1개면 0.5.
+    """
+    items = [(k, v) for k, v in values.items() if v is not None]
+    n = len(items)
+    if n == 0:
+        return {}
+    if n == 1:
+        return {items[0][0]: 0.5}
+    ordered = sorted(items, key=lambda kv: kv[1])
+    return {k: i / (n - 1) for i, (k, _) in enumerate(ordered)}
+
+
 def build_features(
     candles: Sequence,
     current_price: Optional[float] = None,
+    context: Optional[dict] = None,
 ) -> dict:
     """
     최신 -> 과거 순 캔들로부터 Feature dict를 생성한다.
 
     캔들 객체는 close_price, high_price, low_price, open_price, volume 속성을 가진
     apps.market.Candle(또는 동일 인터페이스)이면 된다.
+
+    context(선택): 유니버스/지수/레짐 컨텍스트를 조인한다(설계 3.1 (7),(8)).
+      - index_ret_1: 지수 1봉 로그수익 → 초과수익(잔차) 계산
+      - beta: 종목 베타(기본 1.0)
+      - index_vol, index_trend: 지수 변동성/추세
+      - regime_code: 레짐 코드(BULL=1, SIDEWAYS=0, BEAR=-1 등)
+      - cs_return_rank: 횡단면 수익률 랭크(0~1, 호출자가 cross_sectional_rank로 계산)
     """
     payload: dict = {}
     if not candles:
@@ -149,5 +173,15 @@ def build_features(
         minutes = opened_at.hour * 60 + opened_at.minute - (9 * 60)
         payload["minutes_since_open"] = float(max(minutes, 0))
         payload["dow"] = float(opened_at.weekday())
+
+    # --- 횡단면·지수·레짐 컨텍스트 조인 ---
+    if context:
+        index_ret = context.get("index_ret_1")
+        if index_ret is not None and "ret_1" in payload:
+            beta = float(context.get("beta", 1.0))
+            payload["excess_ret_1"] = payload["ret_1"] - beta * float(index_ret)
+        for key in ("index_vol", "index_trend", "regime_code", "cs_return_rank"):
+            if context.get(key) is not None:
+                payload[key] = float(context[key])
 
     return payload

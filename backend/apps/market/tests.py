@@ -354,3 +354,36 @@ class KISSubscribeFrameTestCase(SimpleTestCase):
         self.assertEqual(frame["header"]["custtype"], "P")
         self.assertEqual(frame["body"]["input"]["tr_id"], "H0STCNT0")
         self.assertEqual(frame["body"]["input"]["tr_key"], "005930")
+
+
+from core.features.builder import cross_sectional_rank
+
+
+class CrossSectionalFeatureTestCase(SimpleTestCase):
+    def test_cross_sectional_rank(self):
+        ranks = cross_sectional_rank({"A": 1.0, "B": 2.0, "C": 3.0})
+        self.assertEqual(ranks["A"], 0.0)
+        self.assertEqual(ranks["B"], 0.5)
+        self.assertEqual(ranks["C"], 1.0)
+        self.assertEqual(cross_sectional_rank({"A": 5.0}), {"A": 0.5})
+        self.assertEqual(cross_sectional_rank({}), {})
+
+    def test_build_features_with_context(self):
+        candles = [_candle(100 - i) for i in range(25)]  # 시간순 상승 → ret_1>0
+        context = {
+            "index_ret_1": 0.001, "beta": 1.0,
+            "index_vol": 0.002, "index_trend": 0.5,
+            "regime_code": 1, "cs_return_rank": 0.8,
+        }
+        feats = build_features(candles, current_price=100, context=context)
+        self.assertAlmostEqual(feats["excess_ret_1"], feats["ret_1"] - 0.001, places=9)
+        self.assertEqual(feats["regime_code"], 1.0)
+        self.assertEqual(feats["index_vol"], 0.002)
+        self.assertEqual(feats["cs_return_rank"], 0.8)
+
+    def test_context_optional(self):
+        # context 없으면 기존 동작 그대로(추가 키 없음)
+        candles = [_candle(100 - i) for i in range(25)]
+        feats = build_features(candles)
+        self.assertNotIn("excess_ret_1", feats)
+        self.assertNotIn("regime_code", feats)
