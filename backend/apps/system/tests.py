@@ -391,3 +391,47 @@ class DatasetWalkForwardTestCase(TestCase):
         for f in result["folds"]:
             self.assertIn("auc", f)
             self.assertEqual(f["n_test"], 5)
+
+
+import numpy as _np
+from core.ml.diagnostics import (
+    deflated_sharpe_ratio,
+    expected_max_sharpe,
+    pbo_cscv,
+    probabilistic_sharpe_ratio,
+)
+
+
+class DiagnosticsTestCase(SimpleTestCase):
+    def test_psr_midpoint_and_monotonic(self):
+        # 관측 샤프 = 기준이면 ~0.5
+        self.assertAlmostEqual(probabilistic_sharpe_ratio(0.1, 100, 0.1), 0.5, places=6)
+        # 샤프가 클수록 PSR 증가
+        self.assertGreater(
+            probabilistic_sharpe_ratio(0.2, 100, 0.0),
+            probabilistic_sharpe_ratio(0.05, 100, 0.0),
+        )
+
+    def test_expected_max_sharpe_increases_with_trials(self):
+        self.assertGreater(
+            expected_max_sharpe(100, 0.01), expected_max_sharpe(5, 0.01)
+        )
+
+    def test_deflated_sharpe_drops_with_more_trials(self):
+        dsr_few = deflated_sharpe_ratio(0.3, 250, n_trials=2, sr_variance=0.01)
+        dsr_many = deflated_sharpe_ratio(0.3, 250, n_trials=200, sr_variance=0.01)
+        self.assertGreater(dsr_few, dsr_many)
+
+    def test_pbo_low_for_genuine_skill(self):
+        # config0가 모든 블록에서 우월 → IS 최적이 OS에서도 최상 → PBO 낮음
+        T, N = 40, 4
+        M = _np.random.default_rng(0).normal(0, 0.001, size=(T, N))
+        M[:, 0] += 0.05  # 지속 우월
+        self.assertLess(pbo_cscv(M, n_splits=6), 0.1)
+
+    def test_pbo_range_and_validation(self):
+        M = _np.random.default_rng(1).normal(0, 0.01, size=(30, 5))
+        pbo = pbo_cscv(M, n_splits=6)
+        self.assertTrue(0.0 <= pbo <= 1.0)
+        with self.assertRaises(ValueError):
+            pbo_cscv(_np.zeros((10, 1)))  # N<2
