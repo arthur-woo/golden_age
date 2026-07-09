@@ -601,3 +601,45 @@ class BackfillUniverseTestCase(TestCase):
         self.assertEqual(
             Candle.objects.filter(source="kis_rest", timeframe=Candle.Timeframe.MIN_1).count(), 2
         )
+
+
+from datetime import timedelta as _td11
+
+
+class IndexRegimeSnapshotTestCase(TestCase):
+    def setUp(self):
+        from core.analyzer.regime import build_index_regime_snapshot  # noqa
+        self.index = Stock.objects.create(market=Stock.Market.KOSPI, symbol="069500", name="KODEX200")
+        base = datetime(2024, 1, 2, tzinfo=dt_timezone.utc)
+        for i in range(35):
+            p = Decimal(str(70000 + i * 100 + (i % 3) * 50))
+            Candle.objects.create(
+                stock=self.index, timeframe=Candle.Timeframe.DAY_1,
+                opened_at=base + _td11(days=i),
+                open_price=p, high_price=p, low_price=p, close_price=p,
+                volume=Decimal("1000000"), source="test",
+            )
+
+    def test_build_snapshot(self):
+        from apps.market.models import RegimeSnapshot
+        from core.analyzer.regime import build_index_regime_snapshot
+
+        snap = build_index_regime_snapshot(self.index, timeframe="1d", n_regimes=3)
+        self.assertIsNotNone(snap)
+        self.assertIn(snap.regime, dict(RegimeSnapshot.Regime.choices))
+        self.assertIsInstance(snap.parameter_payload, dict)
+
+    def test_account_executor_gate(self):
+        from django.contrib.auth import get_user_model
+        from apps.account.models import Account
+        from core.pipeline.account_executor import _build_index_regime
+
+        user = get_user_model().objects.create_user("ir", password="pw")
+        account = Account.objects.create(
+            user=user, broker=Account.Broker.KIS,
+            account_type=Account.AccountType.PAPER, account_number="1",
+            name="A", app_key_encrypted="k", app_secret_encrypted="s",
+        )
+        self.assertIsNone(_build_index_regime(account))  # 미설정 시 None
+        with self.settings(REGIME_INDEX_SYMBOL="069500"):
+            self.assertIsNotNone(_build_index_regime(account))

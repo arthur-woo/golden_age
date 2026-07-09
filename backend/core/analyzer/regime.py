@@ -9,6 +9,7 @@ scipy.cluster.vq.kmeans2를 사용하므로 별도 의존성이 없다.
 from __future__ import annotations
 
 import math
+from decimal import Decimal
 
 import numpy as np
 from scipy.cluster.vq import kmeans2
@@ -111,3 +112,33 @@ class IndexRegimeModel:
             "cluster": k,
             "parameter_payload": payload,
         }
+
+
+def build_index_regime_snapshot(index_stock, timeframe="1d", n_regimes=4, window=20):
+    """
+    지수 캔들로 레짐을 추정해 mkt_regime_snapshot을 생성한다(B-5 실배선).
+
+    데이터 부족 시 None. parameter_payload에 CHAOS 킬스위치/사이징 배수가 실려
+    trader_executor가 그대로 소비한다.
+    """
+    from django.utils import timezone
+    from apps.market.models import Candle, RegimeSnapshot
+
+    candles = list(
+        Candle.objects.filter(stock=index_stock, timeframe=timeframe).order_by("opened_at")
+    )
+    closes = [float(c.close_price) for c in candles]
+    feats, _ = build_index_features(closes, window)
+    if len(feats) < n_regimes:
+        return None
+
+    model = IndexRegimeModel.fit(feats, n_regimes=min(n_regimes, len(feats)))
+    info = model.regime_info(feats[-1])
+    return RegimeSnapshot.objects.create(
+        stock=index_stock,
+        regime=info["regime"],
+        confidence_score=Decimal("0.7"),
+        parameter_payload=info["parameter_payload"],
+        reason=f"IndexRegime cluster={info['cluster']} chaos={info['is_chaos']}",
+        analyzed_at=timezone.now(),
+    )
