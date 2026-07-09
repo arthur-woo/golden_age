@@ -87,6 +87,21 @@ def get_open_position_count(account: Account) -> int:
     return sum(1 for r in rows if r["qty"] and r["qty"] > 0)
 
 
+def get_day_start_equity(account: Account, at) -> Optional[float]:
+    """당일(자정 이후) 첫 잔고 스냅샷의 총자산을 반환한다(일중 손익 기준). 없으면 None."""
+    from apps.account.models import BalanceSnapshot
+
+    day_start = at.replace(hour=0, minute=0, second=0, microsecond=0)
+    snap = (
+        BalanceSnapshot.objects.filter(
+            account=account, snapshotted_at__gte=day_start, snapshotted_at__lte=at
+        )
+        .order_by("snapshotted_at")
+        .first()
+    )
+    return float(snap.total_asset_value) if snap else None
+
+
 def _risk_limits(trader: Trader) -> RiskLimits:
     """Trader.config_payload['risk_limits']로 한도를 오버라이드(없으면 기본값)."""
     cfg = (trader.config_payload or {}).get("risk_limits", {})
@@ -380,11 +395,17 @@ def execute_trader_for_stock(
             ml_output=ml_output,
             candles=candles,
         )
+        day_start_equity = get_day_start_equity(account, timezone.now())
+        day_pnl = (
+            float(total_asset_value) - day_start_equity
+            if day_start_equity is not None
+            else 0.0
+        )
         portfolio = PortfolioState(
             equity=float(total_asset_value),
             gross_exposure=float(total_asset_value - cash_balance),
             num_positions=get_open_position_count(account),
-            day_pnl=0.0,  # TODO: 일중 손익 피드 연결 시 킬스위치 활성화
+            day_pnl=day_pnl,  # 당일 시작 자본 대비 손익 → 손실 한도 킬스위치
         )
         guard = can_open_new_position(
             portfolio,

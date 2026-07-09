@@ -425,6 +425,50 @@ class TradingPipelineTestCase(TestCase):
         self.assertIn("[Risk Guard]", dec.reason)
         self.assertEqual(Order.objects.count(), 0)
 
+    @patch("core.pipeline.trader_executor.get_broker_for_account")
+    @patch("core.pipeline.account_executor.get_broker_for_account")
+    def test_daily_loss_kill_switch_blocks_buy(self, mock_acc, mock_trd):
+        """당일 시작 자본 대비 손실이 한도(3%)를 넘으면 신규 진입이 차단된다."""
+        # 당일 시작 잔고 스냅샷(10.5M) 선기록 → 현재 10M이면 -4.8% 손실
+        BalanceSnapshot.objects.create(
+            account=self.account,
+            cash_balance=Decimal("10500000"),
+            total_asset_value=Decimal("10500000"),
+            snapshot_payload={},
+            snapshotted_at=timezone.now() - timedelta(minutes=5),
+        )
+        broker = MagicMock()
+        bal = MagicMock()
+        bal.cash_balance = Decimal("10000000")
+        bal.total_asset_value = Decimal("10000000")
+        bal.raw_payload = {}
+        broker.get_balance.return_value = bal
+        price = MagicMock()
+        price.price = Decimal("70000")
+        broker.get_current_price.return_value = price
+        ores = MagicMock()
+        ores.success = True
+        ores.order_id = "O"
+        ores.raw_payload = {}
+        broker.create_order.return_value = ores
+        mock_acc.return_value = broker
+        mock_trd.return_value = broker
+
+        TraderStrategy.objects.create(
+            trader=self.trader,
+            strategy_version=self.strategy_version,
+            slot=TraderStrategy.Slot.FIRST,
+            weight=Decimal("1.0"),
+            config_payload={"action": "BUY", "confidence_score": "0.8"},
+            is_active=True,
+        )
+        execute_account_run(self.account.id)
+
+        dec = DecisionLog.objects.first()
+        self.assertEqual(dec.final_action, DecisionLog.FinalAction.HOLD)
+        self.assertIn("킬스위치", dec.reason)
+        self.assertEqual(Order.objects.count(), 0)
+
 
 class StrategyIsolationTestCase(TestCase):
     """개발자별(Hong/Kim) 격리 전략이 StrategyRunner로 로딩되어 결정적으로 동작하는지 검증."""
@@ -822,9 +866,13 @@ class UniverseBacktestTestCase(TestCase):
 
         self.user = User.objects.create_user(username="uni", password="pw")
         self.account = Account.objects.create(
-            user=self.user, broker=Account.Broker.KIS,
-            account_type=Account.AccountType.PAPER, account_number="444",
-            name="U", app_key_encrypted="k", app_secret_encrypted="s",
+            user=self.user,
+            broker=Account.Broker.KIS,
+            account_type=Account.AccountType.PAPER,
+            account_number="444",
+            name="U",
+            app_key_encrypted="k",
+            app_secret_encrypted="s",
         )
         self.base = datetime(2024, 1, 2, tzinfo=dt_tz.utc)
         # 유동 2종목(대량 거래) + 비유동 1종목(소량)
@@ -840,26 +888,43 @@ class UniverseBacktestTestCase(TestCase):
             for i in range(10):
                 p = Decimal(str(70000 + i * 100))
                 Candle.objects.create(
-                    stock=stock, timeframe=Candle.Timeframe.DAY_1,
+                    stock=stock,
+                    timeframe=Candle.Timeframe.DAY_1,
                     opened_at=self.base + timedelta(days=i),
-                    open_price=p, high_price=p, low_price=p, close_price=p,
-                    volume=Decimal(str(vol)), source="test",
+                    open_price=p,
+                    high_price=p,
+                    low_price=p,
+                    close_price=p,
+                    volume=Decimal(str(vol)),
+                    source="test",
                 )
         self.trader = Trader.objects.create(
-            account=self.account, name="Bot", code="BOT",
-            position_size_ratio=Decimal("0.05"), entry_threshold=Decimal("0.5"),
-            stop_loss_ratio=Decimal("0.05"), take_profit_ratio=Decimal("0.1"),
+            account=self.account,
+            name="Bot",
+            code="BOT",
+            position_size_ratio=Decimal("0.05"),
+            entry_threshold=Decimal("0.5"),
+            stop_loss_ratio=Decimal("0.05"),
+            take_profit_ratio=Decimal("0.1"),
             max_exposure_ratio=Decimal("0.3"),
             config_payload={"candle_timeframe": "1d"},
         )
-        strat = Strategy.objects.create(owner=self.user, namespace="t", name="M", code="M")
+        strat = Strategy.objects.create(
+            owner=self.user, namespace="t", name="M", code="M"
+        )
         sv = StrategyVersion.objects.create(
-            strategy=strat, version="v1", module_path="apps.trading.tests",
-            class_name="MockStrategy", status=StrategyVersion.Status.ACTIVE,
+            strategy=strat,
+            version="v1",
+            module_path="apps.trading.tests",
+            class_name="MockStrategy",
+            status=StrategyVersion.Status.ACTIVE,
         )
         TraderStrategy.objects.create(
-            trader=self.trader, strategy_version=sv, slot=TraderStrategy.Slot.FIRST,
-            weight=Decimal("1.0"), config_payload={"action": "BUY", "confidence_score": "0.8"},
+            trader=self.trader,
+            strategy_version=sv,
+            slot=TraderStrategy.Slot.FIRST,
+            weight=Decimal("1.0"),
+            config_payload={"action": "BUY", "confidence_score": "0.8"},
             is_active=True,
         )
 
@@ -871,7 +936,10 @@ class UniverseBacktestTestCase(TestCase):
         cfg = CandidateConfig(min_turnover=1e8, vol_low=0.0, vol_high=1.0, top_k=5)
         bars = [self.base + timedelta(days=8), self.base + timedelta(days=9)]
         result = run_universe_backtest(
-            self.trader, self.liquid + [self.illiquid], bars, Decimal("100000000"),
+            self.trader,
+            self.liquid + [self.illiquid],
+            bars,
+            Decimal("100000000"),
             candidate_config=cfg,
         )
 
@@ -896,53 +964,88 @@ class ContextFeatureFlowTestCase(TestCase):
 
         user = User.objects.create_user(username="ctx", password="pw")
         account = Account.objects.create(
-            user=user, broker=Account.Broker.KIS,
-            account_type=Account.AccountType.PAPER, account_number="555",
-            name="C", app_key_encrypted="k", app_secret_encrypted="s",
+            user=user,
+            broker=Account.Broker.KIS,
+            account_type=Account.AccountType.PAPER,
+            account_number="555",
+            name="C",
+            app_key_encrypted="k",
+            app_secret_encrypted="s",
         )
-        stock = Stock.objects.create(market=Stock.Market.KOSPI, symbol="005930", name="삼성전자")
+        stock = Stock.objects.create(
+            market=Stock.Market.KOSPI, symbol="005930", name="삼성전자"
+        )
         base = datetime(2024, 1, 2, 9, 0, tzinfo=dt_tz.utc)
         for i in range(20):
             p = Decimal(str(70000 + i * 10))
             Candle.objects.create(
-                stock=stock, timeframe=Candle.Timeframe.MIN_1,
+                stock=stock,
+                timeframe=Candle.Timeframe.MIN_1,
                 opened_at=base + timedelta(minutes=i),
-                open_price=p, high_price=p, low_price=p, close_price=p,
-                volume=Decimal("1000"), source="test",
+                open_price=p,
+                high_price=p,
+                low_price=p,
+                close_price=p,
+                volume=Decimal("1000"),
+                source="test",
             )
         trader = Trader.objects.create(
-            account=account, name="Bot", code="BOT", ml_filter_enabled=True,
-            position_size_ratio=Decimal("0.1"), entry_threshold=Decimal("0.5"),
-            stop_loss_ratio=Decimal("0.05"), take_profit_ratio=Decimal("0.1"),
-            max_exposure_ratio=Decimal("0.3"), config_payload={"candle_timeframe": "1m"},
+            account=account,
+            name="Bot",
+            code="BOT",
+            ml_filter_enabled=True,
+            position_size_ratio=Decimal("0.1"),
+            entry_threshold=Decimal("0.5"),
+            stop_loss_ratio=Decimal("0.05"),
+            take_profit_ratio=Decimal("0.1"),
+            max_exposure_ratio=Decimal("0.3"),
+            config_payload={"candle_timeframe": "1m"},
         )
         strat = Strategy.objects.create(owner=user, namespace="t", name="M", code="M")
         sv = StrategyVersion.objects.create(
-            strategy=strat, version="v1", module_path="apps.trading.tests",
-            class_name="MockStrategy", status=StrategyVersion.Status.ACTIVE,
+            strategy=strat,
+            version="v1",
+            module_path="apps.trading.tests",
+            class_name="MockStrategy",
+            status=StrategyVersion.Status.ACTIVE,
         )
         TraderStrategy.objects.create(
-            trader=trader, strategy_version=sv, slot=TraderStrategy.Slot.FIRST,
-            weight=Decimal("1.0"), config_payload={"action": "BUY", "confidence_score": "0.8"},
+            trader=trader,
+            strategy_version=sv,
+            slot=TraderStrategy.Slot.FIRST,
+            weight=Decimal("1.0"),
+            config_payload={"action": "BUY", "confidence_score": "0.8"},
             is_active=True,
         )
 
         broker = MagicMock()
-        bal = MagicMock(); bal.cash_balance = Decimal("10000000"); bal.total_asset_value = Decimal("10000000"); bal.raw_payload = {}
+        bal = MagicMock()
+        bal.cash_balance = Decimal("10000000")
+        bal.total_asset_value = Decimal("10000000")
+        bal.raw_payload = {}
         broker.get_balance.return_value = bal
-        price = MagicMock(); price.price = Decimal("70190"); broker.get_current_price.return_value = price
+        price = MagicMock()
+        price.price = Decimal("70190")
+        broker.get_current_price.return_value = price
         mock_broker_fn.return_value = broker
 
         account_run = ExecutionRun.objects.create(
-            account=account, run_type=ExecutionRun.RunType.SCHEDULED,
-            status=ExecutionRun.Status.RUNNING, started_at=timezone.now(),
+            account=account,
+            run_type=ExecutionRun.RunType.SCHEDULED,
+            status=ExecutionRun.Status.RUNNING,
+            started_at=timezone.now(),
         )
         run = TraderExecutionRun.objects.create(
-            account_run=account_run, trader=trader,
-            status=TraderExecutionRun.Status.RUNNING, started_at=timezone.now(),
+            account_run=account_run,
+            trader=trader,
+            status=TraderExecutionRun.Status.RUNNING,
+            started_at=timezone.now(),
         )
         execute_trader_for_stock(
-            trader, run, stock, None,
+            trader,
+            run,
+            stock,
+            None,
             context={"index_ret_1": 0.0005, "cs_return_rank": 0.7},
         )
 
