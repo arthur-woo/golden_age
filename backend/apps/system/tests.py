@@ -435,3 +435,58 @@ class DiagnosticsTestCase(SimpleTestCase):
         self.assertTrue(0.0 <= pbo <= 1.0)
         with self.assertRaises(ValueError):
             pbo_cscv(_np.zeros((10, 1)))  # N<2
+
+
+from core.ml.calibration import (
+    IsotonicCalibrator,
+    PlattCalibrator,
+    calibrator_from_dict,
+    fit_calibrator,
+)
+
+
+class CalibrationTestCase(SimpleTestCase):
+    def _data(self):
+        # 점수가 높을수록 양성 비율↑ (보정 가능한 신호)
+        scores = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 0.95]
+        labels = [0, 0, 0, 0, 1, 0, 1, 1, 1, 1]
+        return scores, labels
+
+    def test_isotonic_monotonic_and_ranged(self):
+        cal = IsotonicCalibrator.fit(*self._data())
+        lo, hi = cal.predict(0.15), cal.predict(0.9)
+        self.assertLessEqual(lo, hi)  # 단조
+        for s in (0.0, 0.5, 1.0):
+            self.assertTrue(0.0 <= cal.predict(s) <= 1.0)
+
+    def test_platt_ranged_and_serializable(self):
+        cal = PlattCalibrator.fit(*self._data())
+        self.assertGreater(cal.predict(0.9), cal.predict(0.1))  # 단조 증가
+        restored = calibrator_from_dict(cal.to_dict())
+        self.assertAlmostEqual(restored.predict(0.7), cal.predict(0.7), places=9)
+
+    def test_isotonic_roundtrip(self):
+        cal = IsotonicCalibrator.fit(*self._data())
+        restored = calibrator_from_dict(cal.to_dict())
+        self.assertEqual(restored.predict(0.6), cal.predict(0.6))
+
+    def test_predictor_applies_and_persists_calibrator(self):
+        feats = [{"x": 1.0} if i % 2 == 0 else {"x": -1.0} for i in range(40)]
+        labels = [1 if i % 2 == 0 else 0 for i in range(40)]
+        pred, _ = LightGBMPredictor.train(feats, labels, num_boost_round=20)
+        raw_hi = float(pred.booster.predict(_np_vec(pred, {"x": 1.0}))[0])
+        pred.fit_calibration(feats, labels, method="isotonic")
+        cal_hi = pred.predict_proba({"x": 1.0})
+        self.assertTrue(0.0 <= cal_hi <= 1.0)
+
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "m.pkl")
+            pred.save(path)
+            loaded = LightGBMPredictor.load(path)
+            self.assertIsNotNone(loaded.calibrator)
+            self.assertAlmostEqual(loaded.predict_proba({"x": 1.0}), cal_hi, places=6)
+
+
+def _np_vec(pred, d):
+    from core.ml.predictor import _vectorize
+    return _vectorize([d], pred.feature_names)

@@ -64,6 +64,7 @@ def _vectorize(
 class LightGBMPredictor:
     booster: lgb.Booster
     feature_names: list[str]
+    calibrator: object = None  # core.ml.calibration.* (선택)
 
     @classmethod
     def train(
@@ -116,15 +117,32 @@ class LightGBMPredictor:
         return predictor, metrics
 
     def predict_proba(self, feature_dict: dict) -> float:
-        """단일 Feature dict에 대한 양성(매매 성공) 확률."""
+        """단일 Feature dict에 대한 양성(매매 성공) 확률. 보정기가 있으면 적용."""
         X = _vectorize([feature_dict], self.feature_names)
-        return float(self.booster.predict(X)[0])
+        raw = float(self.booster.predict(X)[0])
+        if self.calibrator is not None:
+            return self.calibrator.predict(raw)
+        return raw
+
+    def fit_calibration(
+        self,
+        feature_dicts: Sequence[dict],
+        labels: Sequence[int],
+        method: str = "isotonic",
+    ):
+        """검증셋으로 확률 보정기를 학습해 부착한다(isotonic|platt)."""
+        from core.ml.calibration import fit_calibrator
+
+        raws = self.booster.predict(_vectorize(feature_dicts, self.feature_names))
+        self.calibrator = fit_calibrator(list(map(float, raws)), list(labels), method)
+        return self.calibrator
 
     def save(self, path: str) -> str:
         """모델을 path 에 저장하고 파일 checksum(sha256)을 반환한다."""
         blob = {
             "model_str": self.booster.model_to_string(),
             "feature_names": self.feature_names,
+            "calibrator": self.calibrator.to_dict() if self.calibrator else None,
         }
         data = pickle.dumps(blob)
         with open(path, "wb") as f:
@@ -133,7 +151,13 @@ class LightGBMPredictor:
 
     @classmethod
     def load(cls, path: str) -> "LightGBMPredictor":
+        from core.ml.calibration import calibrator_from_dict
+
         with open(path, "rb") as f:
             blob = pickle.loads(f.read())
         booster = lgb.Booster(model_str=blob["model_str"])
-        return cls(booster=booster, feature_names=blob["feature_names"])
+        return cls(
+            booster=booster,
+            feature_names=blob["feature_names"],
+            calibrator=calibrator_from_dict(blob.get("calibrator")),
+        )
