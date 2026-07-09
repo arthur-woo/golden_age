@@ -32,6 +32,7 @@ logger = logging.getLogger(__name__)
 REALTIME_TRADE_TR_ID = "H0STCNT0"  # 실시간 주식체결가
 FIELDS_PER_RECORD = 46  # H0STCNT0 레코드당 필드 수
 KST = dt_timezone(timedelta(hours=9))  # 한국 표준시
+MAX_WS_SYMBOLS = 40  # KIS 실시간 세션당 등록 종목 수 한도(근사). 초과분은 REST 백필로 커버.
 
 
 @dataclass(frozen=True)

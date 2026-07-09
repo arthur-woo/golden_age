@@ -36,7 +36,11 @@ class Command(BaseCommand):
     help = "실시간 체결을 1분봉으로 집계해 mkt_candle에 적재한다."
 
     def add_arguments(self, parser):
-        parser.add_argument("--symbol", required=True)
+        parser.add_argument("--symbol", help="단일 종목 코드")
+        parser.add_argument(
+            "--universe", action="store_true", help="수집 유니버스 hot set 구독"
+        )
+        parser.add_argument("--top", type=int, default=40, help="hot set 상위 N종목")
         parser.add_argument("--market", default=Stock.Market.KOSPI)
         parser.add_argument("--source", default="kis_ws")
         parser.add_argument("--demo", action="store_true", help="합성 틱으로 파이프라인 검증")
@@ -44,19 +48,41 @@ class Command(BaseCommand):
         parser.add_argument("--account-id", type=int, help="실시간 모드 인증에 사용할 계좌 id")
 
     def handle(self, *args, **opts):
-        try:
-            stock = Stock.objects.get(market=opts["market"], symbol=opts["symbol"])
-        except Stock.DoesNotExist:
-            raise CommandError(f"종목을 찾을 수 없습니다: {opts['market']} {opts['symbol']}")
-
         collector = RealtimeCollector(source=opts["source"])
 
+        # 데모: 단일 종목 합성 틱
         if opts["demo"]:
+            if not opts.get("symbol"):
+                raise CommandError("--demo 에는 --symbol 이 필요합니다.")
+            stock = self._get_stock(opts)
             total = collector.consume(
                 _demo_ticks(stock.id, opts["demo_minutes"]), finalize=True
             )
             self.stdout.write(self.style.SUCCESS(f"합성 수집 완료: {total}개 캔들 적재"))
             return
+
+        # 실시간 대상 종목 결정: 유니버스 hot set 또는 단일 종목
+        from core.broker.kis.realtime import MAX_WS_SYMBOLS
+
+        if opts["universe"]:
+            from core.universe.hotset import select_hot_symbols
+
+            symbols = select_hot_symbols(top_k=opts["top"])
+        elif opts.get("symbol"):
+            symbols = [opts["symbol"]]
+        else:
+            raise CommandError("--symbol 또는 --universe 중 하나가 필요합니다.")
+
+        if not symbols:
+            raise CommandError("구독할 종목이 없습니다(수집 유니버스/캔들 확인).")
+        if len(symbols) > MAX_WS_SYMBOLS:
+            self.stdout.write(
+                self.style.WARNING(
+                    f"WS 세션 한도({MAX_WS_SYMBOLS}) 초과 → 상위 {MAX_WS_SYMBOLS}종목만 구독. "
+                    f"나머지는 REST 백필로 커버하세요."
+                )
+            )
+            symbols = symbols[:MAX_WS_SYMBOLS]
 
         if not opts.get("account_id"):
             raise CommandError("실시간 모드에는 --account-id 가 필요합니다. (검증은 --demo 사용)")
@@ -69,5 +95,11 @@ class Command(BaseCommand):
             raise CommandError(f"계좌를 찾을 수 없습니다: id={opts['account_id']}")
 
         adapter = KISRealtimeAdapter(account, collector=collector)
-        self.stdout.write("KIS 실시간 접속 시작... (Ctrl+C로 종료)")
-        adapter.connect_and_run([opts["symbol"]])
+        self.stdout.write(f"KIS 실시간 접속 시작: {len(symbols)}종목 (Ctrl+C로 종료)")
+        adapter.connect_and_run(symbols)
+
+    def _get_stock(self, opts):
+        try:
+            return Stock.objects.get(market=opts["market"], symbol=opts["symbol"])
+        except Stock.DoesNotExist:
+            raise CommandError(f"종목을 찾을 수 없습니다: {opts['market']} {opts['symbol']}")

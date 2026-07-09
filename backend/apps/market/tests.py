@@ -225,8 +225,13 @@ class CollectRealtimeCommandTestCase(TestCase):
     def test_demo_persists_candles(self):
         Stock.objects.create(market=Stock.Market.KOSPI, symbol="005930", name="삼성전자")
         call_command(
-            "collect_realtime", "--symbol", "005930", "--demo",
-            "--demo-minutes", "3", stdout=StringIO(),
+            "collect_realtime",
+            "--symbol",
+            "005930",
+            "--demo",
+            "--demo-minutes",
+            "3",
+            stdout=StringIO(),
         )
         self.assertEqual(Candle.objects.filter(source="kis_ws").count(), 3)
 
@@ -264,10 +269,12 @@ class KISRealtimeParseTestCase(SimpleTestCase):
         self.assertEqual((t.ts.hour, t.ts.minute, t.ts.second), (9, 0, 1))
 
     def test_parse_multi_record(self):
-        frame = _kis_frame([
-            ("005930", "090001", 70000, 10),
-            ("005930", "090002", 70100, 5),
-        ])
+        frame = _kis_frame(
+            [
+                ("005930", "090001", 70000, 10),
+                ("005930", "090002", 70100, 5),
+            ]
+        )
         ticks = parse_realtime_message(frame, trade_date=date(2024, 1, 2))
         self.assertEqual(len(ticks), 2)
         self.assertEqual(ticks[1].price, Decimal("70100"))
@@ -295,17 +302,25 @@ class KISRealtimeAdapterTestCase(TestCase):
 
         user = get_user_model().objects.create_user("kisu", password="pw")
         account = Account.objects.create(
-            user=user, broker=Account.Broker.KIS,
-            account_type=Account.AccountType.PAPER, account_number="9",
-            name="A", app_key_encrypted="k", app_secret_encrypted="s",
+            user=user,
+            broker=Account.Broker.KIS,
+            account_type=Account.AccountType.PAPER,
+            account_number="9",
+            name="A",
+            app_key_encrypted="k",
+            app_secret_encrypted="s",
         )
         adapter = KISRealtimeAdapter(account, trade_date=date(2024, 1, 2))
         messages = [
-            _kis_frame([("005930", "090001", 70000, 10), ("005930", "090030", 70100, 5)]),
+            _kis_frame(
+                [("005930", "090001", 70000, 10), ("005930", "090030", 70100, 5)]
+            ),
             _kis_frame([("005930", "090105", 70200, 3)]),  # 다음 분 -> 9:00 확정
         ]
         total = adapter.run(messages, finalize=True)
-        self.assertEqual(Candle.objects.filter(stock=self.stock, source="kis_ws").count(), 2)
+        self.assertEqual(
+            Candle.objects.filter(stock=self.stock, source="kis_ws").count(), 2
+        )
         self.assertEqual(total, 2)
         c0 = Candle.objects.get(stock=self.stock, opened_at__minute=0, source="kis_ws")
         self.assertEqual(c0.open_price, Decimal("70000"))
@@ -322,27 +337,47 @@ class BackfillCommandTestCase(TestCase):
 
         user = get_user_model().objects.create_user("bf", password="pw")
         account = Account.objects.create(
-            user=user, broker=Account.Broker.KIS,
-            account_type=Account.AccountType.PAPER, account_number="1234567801",
-            name="A", app_key_encrypted="k", app_secret_encrypted="s",
+            user=user,
+            broker=Account.Broker.KIS,
+            account_type=Account.AccountType.PAPER,
+            account_number="1234567801",
+            name="A",
+            app_key_encrypted="k",
+            app_secret_encrypted="s",
         )
         Stock.objects.create(market=Stock.Market.KOSPI, symbol="005930", name="삼성전자")
 
         parsed = [
-            {"opened_at": datetime(2024, 1, 2, 9, 0, tzinfo=_KST),
-             "open": Decimal("69900"), "high": Decimal("70000"), "low": Decimal("69800"),
-             "close": Decimal("70000"), "volume": Decimal("500")},
-            {"opened_at": datetime(2024, 1, 2, 9, 1, tzinfo=_KST),
-             "open": Decimal("70000"), "high": Decimal("70200"), "low": Decimal("69900"),
-             "close": Decimal("70100"), "volume": Decimal("1000")},
+            {
+                "opened_at": datetime(2024, 1, 2, 9, 0, tzinfo=_KST),
+                "open": Decimal("69900"),
+                "high": Decimal("70000"),
+                "low": Decimal("69800"),
+                "close": Decimal("70000"),
+                "volume": Decimal("500"),
+            },
+            {
+                "opened_at": datetime(2024, 1, 2, 9, 1, tzinfo=_KST),
+                "open": Decimal("70000"),
+                "high": Decimal("70200"),
+                "low": Decimal("69900"),
+                "close": Decimal("70100"),
+                "volume": Decimal("1000"),
+            },
         ]
         with _patch(
             "core.broker.kis.broker.KoreaInvestmentBroker.get_minute_candles",
             return_value=parsed,
         ):
             call_command(
-                "backfill_candles", "--account-id", str(account.id),
-                "--symbol", "005930", "--pages", "1", stdout=StringIO(),
+                "backfill_candles",
+                "--account-id",
+                str(account.id),
+                "--symbol",
+                "005930",
+                "--pages",
+                "1",
+                stdout=StringIO(),
             )
         self.assertEqual(Candle.objects.filter(source="kis_rest").count(), 2)
 
@@ -371,9 +406,12 @@ class CrossSectionalFeatureTestCase(SimpleTestCase):
     def test_build_features_with_context(self):
         candles = [_candle(100 - i) for i in range(25)]  # 시간순 상승 → ret_1>0
         context = {
-            "index_ret_1": 0.001, "beta": 1.0,
-            "index_vol": 0.002, "index_trend": 0.5,
-            "regime_code": 1, "cs_return_rank": 0.8,
+            "index_ret_1": 0.001,
+            "beta": 1.0,
+            "index_vol": 0.002,
+            "index_trend": 0.5,
+            "regime_code": 1,
+            "cs_return_rank": 0.8,
         }
         feats = build_features(candles, current_price=100, context=context)
         self.assertAlmostEqual(feats["excess_ret_1"], feats["ret_1"] - 0.001, places=9)
@@ -403,10 +441,14 @@ class ImportCsvCommandTestCase(TestCase):
 
     def test_import_persists_and_creates_stock(self):
         with _tempfile.TemporaryDirectory() as d:
-            self._write_csv(d, "000660", [
-                ("2025-06-24", 270000, 283000, 269500, 278500, 5436312, 0.073),
-                ("2025-06-25", 278500, 280000, 275000, 279000, 3210000, 0.0018),
-            ])
+            self._write_csv(
+                d,
+                "000660",
+                [
+                    ("2025-06-24", 270000, 283000, 269500, 278500, 5436312, 0.073),
+                    ("2025-06-25", 278500, 280000, 275000, 279000, 3210000, 0.0018),
+                ],
+            )
             call_command("import_csv_candles", "--dir", d, stdout=StringIO())
 
             stock = Stock.objects.get(symbol="000660")
@@ -459,3 +501,65 @@ class IndexRegimeTestCase(SimpleTestCase):
     def test_fit_requires_enough_rows(self):
         with self.assertRaises(ValueError):
             IndexRegimeModel.fit([[0.01, 0.002]], n_regimes=4)
+
+
+from unittest.mock import patch as _patch2
+from apps.stock.models import sync_collection_universe as _sync_coll
+from core.universe.hotset import select_hot_symbols
+
+
+class HotSetTestCase(TestCase):
+    def setUp(self):
+        # 거래대금 상이한 3종목 (turnover = close*volume)
+        specs = [("000001", 1000), ("000002", 100), ("000003", 5000)]
+        self.stocks = []
+        for sym, vol in specs:
+            st = Stock.objects.create(market=Stock.Market.KOSPI, symbol=sym, name=sym)
+            Candle.objects.create(
+                stock=st,
+                timeframe=Candle.Timeframe.MIN_1,
+                opened_at=_ts(9, 0, 0),
+                open_price=Decimal("70000"),
+                high_price=Decimal("70000"),
+                low_price=Decimal("70000"),
+                close_price=Decimal("70000"),
+                volume=Decimal(str(vol)),
+                source="test",
+            )
+            self.stocks.append(st)
+        _sync_coll(self.stocks)
+
+    def test_ranks_by_turnover(self):
+        hot = select_hot_symbols(top_k=2)
+        # 000003(5000) > 000001(1000) > 000002(100)
+        self.assertEqual(hot, ["000003", "000001"])
+
+    def test_command_subscribes_hot_set(self):
+        from django.contrib.auth import get_user_model
+        from apps.account.models import Account
+
+        user = get_user_model().objects.create_user("hotu", password="pw")
+        account = Account.objects.create(
+            user=user,
+            broker=Account.Broker.KIS,
+            account_type=Account.AccountType.PAPER,
+            account_number="1",
+            name="A",
+            app_key_encrypted="k",
+            app_secret_encrypted="s",
+        )
+        with _patch2(
+            "core.broker.kis.realtime.KISRealtimeAdapter.connect_and_run"
+        ) as mock_run:
+            call_command(
+                "collect_realtime",
+                "--universe",
+                "--top",
+                "2",
+                "--account-id",
+                str(account.id),
+                stdout=StringIO(),
+            )
+        mock_run.assert_called_once()
+        subscribed = mock_run.call_args[0][0]
+        self.assertEqual(subscribed, ["000003", "000001"])
