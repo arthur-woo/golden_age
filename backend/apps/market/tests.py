@@ -422,3 +422,40 @@ class ImportCsvCommandTestCase(TestCase):
             # 재실행해도 멱등(중복 없음)
             call_command("import_csv_candles", "--dir", d, stdout=StringIO())
             self.assertEqual(candles.count(), 2)
+
+
+from core.analyzer.regime import IndexRegimeModel, build_index_features
+
+
+class IndexRegimeTestCase(SimpleTestCase):
+    def _matrix(self):
+        # 저변동 상승 군집 20개 + 고변동 카오스 군집 20개
+        calm = [[0.05, 0.002] for _ in range(20)]
+        chaos = [[0.0, 0.05] for _ in range(20)]
+        return calm + chaos
+
+    def test_clusters_separate_and_chaos_flagged(self):
+        model = IndexRegimeModel.fit(self._matrix(), n_regimes=2, seed=0)
+        calm_label = model.predict_label([0.05, 0.002])
+        chaos_label = model.predict_label([0.0, 0.05])
+        self.assertNotEqual(calm_label, chaos_label)
+
+        # 고변동 군집이 CHAOS로 지정 → 신규 진입 차단 파라미터
+        chaos_info = model.regime_info([0.0, 0.05])
+        self.assertTrue(chaos_info["is_chaos"])
+        self.assertTrue(chaos_info["parameter_payload"].get("block_new_entries"))
+
+        # 저변동 상승 군집은 BULL, 차단 없음
+        calm_info = model.regime_info([0.05, 0.002])
+        self.assertEqual(calm_info["regime"], "BULL")
+        self.assertFalse(calm_info["is_chaos"])
+
+    def test_build_index_features(self):
+        closes = [100.0 + i for i in range(30)]  # 지속 상승
+        feats, idx = build_index_features(closes, window=10)
+        self.assertEqual(len(feats), len(idx))
+        self.assertGreater(feats[-1][0], 0.0)  # 상승 추세
+
+    def test_fit_requires_enough_rows(self):
+        with self.assertRaises(ValueError):
+            IndexRegimeModel.fit([[0.01, 0.002]], n_regimes=4)
