@@ -490,3 +490,40 @@ class CalibrationTestCase(SimpleTestCase):
 def _np_vec(pred, d):
     from core.ml.predictor import _vectorize
     return _vectorize([d], pred.feature_names)
+
+
+class MetaLabelingTestCase(TestCase):
+    def setUp(self):
+        self.stock = Stock.objects.create(
+            market=Stock.Market.KOSPI, symbol="005930", name="삼성전자"
+        )
+        base = datetime(2024, 1, 2, 9, 0, tzinfo=dt_timezone.utc)
+        price = 70000
+        for i in range(60):
+            price += 200 if (i % 10) < 5 else -200
+            p = Decimal(str(price))
+            Candle.objects.create(
+                stock=self.stock, timeframe=Candle.Timeframe.MIN_1,
+                opened_at=base + timedelta(minutes=i),
+                open_price=p, high_price=p, low_price=p, close_price=p,
+                volume=Decimal("1000"), source="test",
+            )
+
+    def test_meta_labeling_gates_samples(self):
+        cfg = DatasetConfig(upper=0.002, lower=0.002, horizon=5, min_history=20, cost=0.0)
+        full = build_dataset_from_candles(self.stock, name="full", version="v1", config=cfg)
+
+        # 1차 신호: 최근 5봉 상승일 때만 진입
+        def primary(feats, index):
+            return feats.get("ret_5", 0.0) > 0
+
+        meta = build_dataset_from_candles(
+            self.stock, name="meta", version="v1", config=cfg, primary_signal_fn=primary
+        )
+
+        self.assertTrue(meta.label_definition["meta_labeling"])
+        self.assertGreater(meta.items.count(), 0)
+        # 게이팅으로 전체보다 표본 수 감소
+        self.assertLess(meta.items.count(), full.items.count())
+        # 메타 표본에는 primary_signal 피처가 실림
+        self.assertEqual(meta.items.first().feature_payload.get("primary_signal"), 1.0)

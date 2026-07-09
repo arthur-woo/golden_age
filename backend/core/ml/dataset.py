@@ -49,9 +49,14 @@ def build_dataset_from_candles(
     version: str,
     timeframe: str = Candle.Timeframe.MIN_1,
     config: Optional[DatasetConfig] = None,
+    primary_signal_fn=None,
 ) -> TrainingDataset:
     """
     특정 종목의 과거 캔들로 학습 데이터셋을 생성하고 반환한다.
+
+    primary_signal_fn(feats, index) -> bool 을 주면 **메타라벨링**(B-7)이 된다:
+    1차 신호가 발화한 바에서만 샘플을 만들고, 라벨은 "그 진입이 비용 차감 후 수익이었는가".
+    2차 모델의 출력 확률이 사이징에 사용된다.
 
     Returns:
         status=READY 로 완료된 TrainingDataset. 샘플이 하나도 없으면 그대로 READY(빈 셋).
@@ -84,6 +89,7 @@ def build_dataset_from_candles(
             "lower": config.lower,
             "horizon": config.horizon,
             "cost": cost,
+            "meta_labeling": primary_signal_fn is not None,
         },
         status=TrainingDataset.Status.BUILDING,
     )
@@ -107,6 +113,13 @@ def build_dataset_from_candles(
 
         window = list(reversed(candles_asc[: i + 1]))[:FEATURE_LOOKBACK]  # 최신 -> 과거
         feats = build_features(window, closes[i])
+
+        # 메타라벨링: 1차 신호가 발화한 바만 샘플로 사용
+        if primary_signal_fn is not None:
+            if not primary_signal_fn(feats, i):
+                continue
+            feats = {**feats, "primary_signal": 1.0}
+
         fs = FeatureSnapshot(
             stock=stock,
             timeframe=timeframe,
