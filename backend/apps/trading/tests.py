@@ -1053,3 +1053,75 @@ class ContextFeatureFlowTestCase(TestCase):
         self.assertIsNotNone(fs)
         self.assertEqual(fs.feature_payload["cs_return_rank"], 0.7)
         self.assertIn("excess_ret_1", fs.feature_payload)  # index_ret_1 + ret_1 조인
+
+
+class FillConfirmationTestCase(TestCase):
+    """체결 확인: 브로커 실제 체결분만 원장에 반영, 상태/이벤트 추적."""
+
+    def setUp(self):
+        self.user = User.objects.create_user(username="fc", password="pw")
+        self.account = Account.objects.create(
+            user=self.user, broker=Account.Broker.KIS,
+            account_type=Account.AccountType.PAPER, account_number="777",
+            name="FC", app_key_encrypted="k", app_secret_encrypted="s",
+        )
+        self.stock = Stock.objects.create(market=Stock.Market.KOSPI, symbol="005930", name="삼성전자")
+        run = ExecutionRun.objects.create(
+            account=self.account, run_type=ExecutionRun.RunType.SCHEDULED,
+            status=ExecutionRun.Status.RUNNING, started_at=timezone.now(),
+        )
+        trader = Trader.objects.create(
+            account=self.account, name="B", code="B",
+            position_size_ratio=Decimal("0.1"), entry_threshold=Decimal("0.5"),
+            stop_loss_ratio=Decimal("0.05"), take_profit_ratio=Decimal("0.1"),
+            max_exposure_ratio=Decimal("0.3"),
+        )
+        self.trader = trader
+        tr_run = TraderExecutionRun.objects.create(
+            account_run=run, trader=trader,
+            status=TraderExecutionRun.Status.RUNNING, started_at=timezone.now(),
+        )
+        self.decision = DecisionLog.objects.create(
+            trader_run=tr_run, stock=self.stock,
+            final_action=DecisionLog.FinalAction.BUY, decided_at=timezone.now(),
+        )
+
+    def _broker(self, execs):
+        broker = MagicMock()
+        res = MagicMock()
+        res.success = True; res.order_id = "X1"; res.error_message = None
+        res.raw_payload = {}  # fill_price 없음 → 체결조회 경로
+        broker.create_order.return_value = res
+        broker.get_order_execution.return_value = execs
+        return broker
+
+    def test_partial_fill_reflected(self):
+        from core.pipeline.trader_executor import execute_order
+        from apps.order.models import Order, OrderEvent
+
+        broker = self._broker([
+            {"order_no": "X1", "filled_qty": Decimal("6"), "avg_price": Decimal("70100")},
+        ])
+        execute_order(self.trader, self.decision, self.stock, Order.Side.BUY,
+                      Decimal("10"), Decimal("70000"), broker)
+
+        order = Order.objects.get()
+        self.assertEqual(order.status, Order.Status.PARTIALLY_FILLED)
+        ex = TradeExecution.objects.get()
+        self.assertEqual(ex.executed_quantity, Decimal("6"))
+        self.assertEqual(ex.executed_price, Decimal("70100"))
+        self.assertEqual(PositionLedger.objects.first().quantity_delta, Decimal("6"))
+        self.assertEqual(OrderEvent.objects.filter(order=order).count(), 2)  # ACCEPTED+PARTIAL
+
+    def test_pending_when_no_fill(self):
+        from core.pipeline.trader_executor import execute_order
+        from apps.order.models import Order
+
+        broker = self._broker([])  # 체결 없음(미체결)
+        execute_order(self.trader, self.decision, self.stock, Order.Side.BUY,
+                      Decimal("10"), Decimal("70000"), broker)
+
+        order = Order.objects.get()
+        self.assertEqual(order.status, Order.Status.ACCEPTED)  # 대기
+        self.assertEqual(TradeExecution.objects.count(), 0)
+        self.assertEqual(PositionLedger.objects.count(), 0)

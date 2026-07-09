@@ -13,7 +13,7 @@ from apps.trading.models import (
     StrategyDecisionLog,
     DecisionLog,
 )
-from apps.order.models import Order, TradeExecution
+from apps.order.models import Order, OrderEvent, TradeExecution
 from apps.market.models import RegimeSnapshot, Candle, FeatureSnapshot
 from apps.account.services import get_broker_for_account
 from core.pipeline.strategy_runner import StrategyRunner
@@ -21,7 +21,7 @@ from core.ml.filter import MLFilterEngine
 from core.features.builder import build_features
 from core.risk.sizing import SizingConfig, compute_position_size
 from core.risk.guard import PortfolioState, RiskLimits, can_open_new_position
-from core.backtest.costs import round_trip_cost_ratio
+from core.backtest.costs import round_trip_cost_ratio, transaction_cost
 
 logger = logging.getLogger(__name__)
 
@@ -481,6 +481,58 @@ def execute_trader_for_stock(
             )
 
 
+def _resolve_fill(broker, order_res, side: str, quantity: Decimal, ref_price: Decimal):
+    """
+    주문의 실제 체결분을 확정한다. (filled_qty, fill_price, fee, tax, slippage) 반환.
+
+    우선순위:
+    1) raw_payload에 fill_price → 즉시 확정(BacktestBroker/즉시체결)
+    2) broker.get_order_execution이 리스트를 주면 실제 체결 조회(부분/미체결 반영)
+    3) 둘 다 아니면 낙관적 즉시체결(요청가) 폴백(체결조회 미지원 브로커/mock)
+    """
+    raw = order_res.raw_payload if isinstance(order_res.raw_payload, dict) else {}
+    if "fill_price" in raw:
+        return (
+            quantity,
+            Decimal(str(raw["fill_price"])),
+            Decimal(str(raw.get("commission", "0"))),
+            Decimal(str(raw.get("tax", "0"))),
+            Decimal(str(raw.get("slippage_cost", "0"))),
+        )
+
+    getter = getattr(broker, "get_order_execution", None)
+    execs = None
+    if callable(getter):
+        try:
+            execs = getter(order_no=order_res.order_id)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("체결 조회 실패(%s): %s", order_res.order_id, e)
+
+    if isinstance(execs, list):
+        matched = [
+            e for e in execs if str(e.get("order_no")) == str(order_res.order_id)
+        ]
+        total = sum(
+            (Decimal(str(e.get("filled_qty", "0"))) for e in matched), Decimal("0")
+        )
+        if total > 0:
+            notional = sum(
+                (
+                    Decimal(str(e["filled_qty"])) * Decimal(str(e["avg_price"]))
+                    for e in matched
+                ),
+                Decimal("0"),
+            )
+            avg = notional / total
+            fee, tax = transaction_cost(side, avg, total)
+            return (total, avg, fee, tax, Decimal("0"))
+        # 확인됨: 아직 미체결 → 원장 미반영(후속 정산/리컨실 대상)
+        return (Decimal("0"), ref_price, Decimal("0"), Decimal("0"), Decimal("0"))
+
+    # 체결조회 미지원(mock 등) → 낙관적 즉시체결 폴백
+    return (quantity, ref_price, Decimal("0"), Decimal("0"), Decimal("0"))
+
+
 def execute_order(
     trader: Trader,
     decision: DecisionLog,
@@ -491,10 +543,11 @@ def execute_order(
     broker,
 ):
     """
-    실제 증권사 주문 전송 및 내부 장부 기록을 실행합니다.
+    증권사 주문 전송 → 체결 확인 → 체결분만 장부에 반영한다.
+    미체결/부분체결/거부를 ord_order.status와 ord_order_event로 추적한다.
     """
     logger.info(
-        "[%s] %s 주문 전송 시작: %s (수량: %s, 단가: %s)",
+        "[%s] %s 주문 전송: %s (수량: %s, 참조가: %s)",
         trader.name,
         side,
         stock.symbol,
@@ -503,16 +556,15 @@ def execute_order(
     )
 
     try:
-        # API 주문 제출
         order_res = broker.create_order(
             symbol=stock.symbol,
             side=side,
             quantity=quantity,
-            price=None,  # 시장가 주문 디폴트
+            price=None,
         )
+        raw = order_res.raw_payload if isinstance(order_res.raw_payload, dict) else {}
 
         with transaction.atomic():
-            # 주문 기록 생성
             order = Order.objects.create(
                 trader_decision_log=decision,
                 account=trader.account,
@@ -520,7 +572,7 @@ def execute_order(
                 side=side,
                 order_type=Order.OrderType.MARKET,
                 quantity=quantity,
-                status=Order.Status.FILLED
+                status=Order.Status.ACCEPTED
                 if order_res.success
                 else Order.Status.REJECTED,
                 broker_order_id=order_res.order_id,
@@ -529,72 +581,91 @@ def execute_order(
                     "side": side,
                     "quantity": str(quantity),
                 },
-                response_payload=order_res.raw_payload
-                if isinstance(order_res.raw_payload, dict)
-                else {},
+                response_payload=raw,
                 requested_at=timezone.now(),
             )
+            submit_msg = order_res.error_message if not order_res.success else ""
+            _record_event(order, order.status, submit_msg, raw)
 
-            if order_res.success:
-                # 브로커가 체결가/비용을 제공하면(BacktestBroker·일부 실브로커) 그대로 반영하여
-                # 백테스트-실거래가 동일 비용 모델(core.backtest.costs)로 정합되도록 한다.
-                # 미제공 시 요청가(price)로 폴백(기존 동작 유지).
-                raw = (
-                    order_res.raw_payload
-                    if isinstance(order_res.raw_payload, dict)
-                    else {}
-                )
-                fill_price = (
-                    Decimal(str(raw["fill_price"])) if "fill_price" in raw else price
-                )
-                fee = Decimal(str(raw.get("commission", "0")))
-                tax = Decimal(str(raw.get("tax", "0")))
-                slippage = Decimal(str(raw.get("slippage_cost", "0")))
+            if not order_res.success:
+                logger.error("[%s] 주문 거부: %s", trader.name, order_res.error_message)
+                return
 
-                execution = TradeExecution.objects.create(
-                    order=order,
-                    account=trader.account,
-                    stock=stock,
-                    side=side,
-                    executed_quantity=quantity,
-                    executed_price=fill_price,
-                    fee_amount=fee,
-                    tax_amount=tax,
-                    slippage_amount=slippage,
-                    executed_at=timezone.now(),
+            filled, fill_price, fee, tax, slippage = _resolve_fill(
+                broker, order_res, side, quantity, price
+            )
+            if filled <= 0:
+                logger.info(
+                    "[%s] 미체결(대기): %s — 후속 정산 대상", trader.name, order.broker_order_id
                 )
+                return  # ACCEPTED 상태 유지, 원장 미반영
 
-                # 현금 원장 업데이트 (수수료·세금 반영)
-                notional = quantity * fill_price
-                if side == Order.Side.BUY:
-                    cash_change = -(notional + fee + tax)
-                else:
-                    cash_change = notional - fee - tax
-                CashLedger.objects.create(
-                    account=trader.account,
-                    trade_execution=execution,
-                    event_type=CashLedger.EventType.BUY
-                    if side == Order.Side.BUY
-                    else CashLedger.EventType.SELL,
-                    amount=cash_change,
-                    occurred_at=timezone.now(),
-                    reason=f"[{trader.name}] {stock.symbol} {side} 체결 반영",
-                )
+            execution = TradeExecution.objects.create(
+                order=order,
+                account=trader.account,
+                stock=stock,
+                side=side,
+                executed_quantity=filled,
+                executed_price=fill_price,
+                fee_amount=fee,
+                tax_amount=tax,
+                slippage_amount=slippage,
+                executed_at=timezone.now(),
+            )
 
-                # 포지션 원장 업데이트
-                qty_change = quantity if side == Order.Side.BUY else -quantity
-                PositionLedger.objects.create(
-                    account=trader.account,
-                    stock=stock,
-                    trade_execution=execution,
-                    quantity_delta=qty_change,
-                    price=fill_price,
-                    occurred_at=timezone.now(),
-                    reason=f"[{trader.name}] {stock.symbol} {side} 체결 반영",
-                )
-                logger.info("[%s] 주문 처리 성공: %s", trader.name, order.broker_order_id)
-            else:
-                logger.error("[%s] 증권사 주문 거부: %s", trader.name, order_res.error_message)
+            notional = filled * fill_price
+            cash_change = (
+                -(notional + fee + tax)
+                if side == Order.Side.BUY
+                else notional - fee - tax
+            )
+            CashLedger.objects.create(
+                account=trader.account,
+                trade_execution=execution,
+                event_type=CashLedger.EventType.BUY
+                if side == Order.Side.BUY
+                else CashLedger.EventType.SELL,
+                amount=cash_change,
+                occurred_at=timezone.now(),
+                reason=f"[{trader.name}] {stock.symbol} {side} 체결 반영",
+            )
+            PositionLedger.objects.create(
+                account=trader.account,
+                stock=stock,
+                trade_execution=execution,
+                quantity_delta=filled if side == Order.Side.BUY else -filled,
+                price=fill_price,
+                occurred_at=timezone.now(),
+                reason=f"[{trader.name}] {stock.symbol} {side} 체결 반영",
+            )
+
+            order.status = (
+                Order.Status.FILLED
+                if filled >= quantity
+                else Order.Status.PARTIALLY_FILLED
+            )
+            order.save(update_fields=["status"])
+            _record_event(order, order.status, "", raw)
+            logger.info(
+                "[%s] 체결 반영: %s %s/%s",
+                trader.name,
+                order.broker_order_id,
+                filled,
+                quantity,
+            )
 
     except Exception as e:
-        logger.exception("[%s] 주문 처리 도중 치명적인 오류 발생: %s", trader.name, e)
+        logger.exception("[%s] 주문 처리 중 오류: %s", trader.name, e)
+
+
+def _record_event(order: Order, status: str, broker_status: str, payload: dict) -> None:
+    """주문 상태 이벤트를 ord_order_event에 append한다."""
+    OrderEvent.objects.create(
+        order=order,
+        event_type=status,
+        broker_status=(
+            str(broker_status)[:64] if isinstance(broker_status, str) else ""
+        ),
+        event_payload=payload if isinstance(payload, dict) else {},
+        occurred_at=timezone.now(),
+    )
