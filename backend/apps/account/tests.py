@@ -214,3 +214,43 @@ class KISOrderExecutionTestCase(TestCase):
         self.assertEqual(execs[0]["filled_qty"], Decimal("10"))
         # 조회 파라미터에 주문번호가 실렸는지
         self.assertEqual(mock_request.call_args[1]["params"]["ODNO"], "987654321")
+
+
+from django.core.management import call_command
+from io import StringIO
+
+
+class RegisterScheduleTestCase(TestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(username="sched", password="pw")
+        self.account = Account.objects.create(
+            user=self.user, broker=Account.Broker.KIS,
+            account_type=Account.AccountType.PAPER, account_number="1234567801",
+            name="A", app_key_encrypted="k", app_secret_encrypted="s",
+        )
+
+    def test_creates_minute_schedule(self):
+        from django_q.models import Schedule
+
+        call_command("register_schedule", "--account-id", str(self.account.id),
+                     "--minutes", "1", stdout=StringIO())
+        s = Schedule.objects.get(name=f"daytrading-account-{self.account.id}")
+        self.assertEqual(s.func, "django.core.management.call_command")
+        self.assertEqual(s.schedule_type, Schedule.MINUTES)
+        self.assertEqual(s.minutes, 1)
+        self.assertIn("run_account_pipeline", s.args)
+
+    def test_idempotent(self):
+        from django_q.models import Schedule
+
+        for _ in range(2):
+            call_command("register_schedule", "--account-id", str(self.account.id),
+                         stdout=StringIO())
+        self.assertEqual(
+            Schedule.objects.filter(name=f"daytrading-account-{self.account.id}").count(), 1
+        )
+
+    def test_missing_account_errors(self):
+        from django.core.management.base import CommandError
+        with self.assertRaises(CommandError):
+            call_command("register_schedule", "--account-id", "99999", stdout=StringIO())
