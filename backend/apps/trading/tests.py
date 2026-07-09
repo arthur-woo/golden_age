@@ -1125,3 +1125,62 @@ class FillConfirmationTestCase(TestCase):
         self.assertEqual(order.status, Order.Status.ACCEPTED)  # 대기
         self.assertEqual(TradeExecution.objects.count(), 0)
         self.assertEqual(PositionLedger.objects.count(), 0)
+
+
+class EODFlattenTestCase(TestCase):
+    """종가 강제청산 토글: 마감 근접 시 보유 포지션 전량 매도."""
+
+    @patch("core.pipeline.trader_executor.get_broker_for_account")
+    def test_flatten_at_eod(self, mock_broker_fn):
+        from datetime import datetime, timezone as dt_tz, timedelta as td
+        from apps.account.models import PositionLedger
+        from apps.order.models import Order
+        from core.pipeline.trader_executor import execute_trader_for_stock, KST
+
+        user = User.objects.create_user("eod", password="pw")
+        account = Account.objects.create(
+            user=user, broker=Account.Broker.KIS,
+            account_type=Account.AccountType.PAPER, account_number="888",
+            name="E", app_key_encrypted="k", app_secret_encrypted="s",
+        )
+        stock = Stock.objects.create(market=Stock.Market.KOSPI, symbol="005930", name="삼성전자")
+        trader = Trader.objects.create(
+            account=account, name="B", code="B",
+            position_size_ratio=Decimal("0.1"), entry_threshold=Decimal("0.5"),
+            stop_loss_ratio=Decimal("0.05"), take_profit_ratio=Decimal("0.1"),
+            max_exposure_ratio=Decimal("0.3"),
+            config_payload={"eod_flatten": True},  # 토글 ON
+        )
+        # 보유 5주(평단 70000)
+        PositionLedger.objects.create(
+            account=account, stock=stock, quantity_delta=Decimal("5"),
+            price=Decimal("70000"), reason="init", occurred_at=timezone.now(),
+        )
+        run = ExecutionRun.objects.create(
+            account=account, run_type=ExecutionRun.RunType.SCHEDULED,
+            status=ExecutionRun.Status.RUNNING, started_at=timezone.now(),
+        )
+        tr_run = TraderExecutionRun.objects.create(
+            account_run=run, trader=trader,
+            status=TraderExecutionRun.Status.RUNNING, started_at=timezone.now(),
+        )
+
+        broker = MagicMock()
+        bal = MagicMock(); bal.cash_balance = Decimal("1000000"); bal.total_asset_value = Decimal("1350000"); bal.raw_payload = {}
+        broker.get_balance.return_value = bal
+        price = MagicMock(); price.price = Decimal("70000")  # 손절/익절 미발동
+        broker.get_current_price.return_value = price
+        ores = MagicMock(); ores.success = True; ores.order_id = "O"; ores.raw_payload = {}
+        broker.create_order.return_value = ores
+        broker.get_order_execution = None  # 폴백 즉시체결
+        mock_broker_fn.return_value = broker
+
+        as_of = datetime(2024, 1, 2, 15, 20, tzinfo=KST)  # 개장+380분 (>=375)
+        execute_trader_for_stock(trader, tr_run, stock, None, as_of=as_of, broker=broker)
+
+        dec = DecisionLog.objects.first()
+        self.assertEqual(dec.final_action, DecisionLog.FinalAction.SELL)
+        self.assertIn("[EOD Flatten]", dec.reason)
+        order = Order.objects.get()
+        self.assertEqual(order.side, Order.Side.SELL)
+        self.assertEqual(order.quantity, Decimal("5"))

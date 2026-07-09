@@ -1,7 +1,10 @@
 import logging
 import math
+from datetime import timedelta, timezone as dt_timezone
 from decimal import Decimal
 from typing import Dict, Optional, Tuple
+
+KST = dt_timezone(timedelta(hours=9))  # 한국 표준시
 from django.db import transaction
 from django.utils import timezone
 
@@ -85,6 +88,13 @@ def get_open_position_count(account: Account) -> int:
         .annotate(qty=Sum("quantity_delta"))
     )
     return sum(1 for r in rows if r["qty"] and r["qty"] > 0)
+
+
+def _is_eod_flatten_time(now_kst, config) -> bool:
+    """개장 후 경과분이 종가청산 임계(기본 375분=15:15) 이상인지."""
+    flatten_from = int((config or {}).get("eod_flatten_from_min", 375))
+    minutes_since_open = now_kst.hour * 60 + now_kst.minute - 9 * 60
+    return minutes_since_open >= flatten_from
 
 
 def get_day_start_equity(account: Account, at) -> Optional[float]:
@@ -274,8 +284,17 @@ def execute_trader_for_stock(
                 f"[Take Profit] 현재가({current_price})가 익절선({avg_entry_price * (1 + adjusted_take_profit):.2f}) 도달."
             )
 
-    # 5. 전략 실행 및 스코어링 (손절/익절 미발생 시)
-    if final_action == DecisionLog.FinalAction.HOLD:
+    # 4-2. 종가 강제 청산(토글): 마감 근접 시 전량 매도 + 신규 진입 금지 (오버나이트 금지)
+    now_kst = (as_of or timezone.now()).astimezone(KST)
+    eod_now = bool(
+        (trader.config_payload or {}).get("eod_flatten")
+    ) and _is_eod_flatten_time(now_kst, trader.config_payload)
+    if eod_now and final_action == DecisionLog.FinalAction.HOLD and current_qty > 0:
+        final_action = DecisionLog.FinalAction.SELL
+        reason_parts.append("[EOD Flatten] 종가 청산 (전량 매도)")
+
+    # 5. 전략 실행 및 스코어링 (손절/익절/EOD 미발생 시). EOD 시간대엔 신규 진입 금지.
+    if final_action == DecisionLog.FinalAction.HOLD and not eod_now:
         trader_strategies = trader.trader_strategies.filter(is_active=True).order_by(
             "slot"
         )
