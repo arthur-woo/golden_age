@@ -315,3 +315,58 @@ class ReconcileTestCase(TestCase):
         from django.db.models import Sum
         net = PositionLedger.objects.filter(account=account).aggregate(q=Sum("quantity_delta"))["q"]
         self.assertEqual(net, D("10"))
+
+
+class RiskMonitorTestCase(TestCase):
+    def test_detects_stop_breach(self):
+        from decimal import Decimal as D
+        from unittest.mock import MagicMock as MM
+        from django.utils import timezone as tz
+        from apps.stock.models import Stock
+        from apps.account.models import PositionLedger
+        from core.pipeline.risk_monitor import find_breached_positions
+
+        user = User.objects.create_user("rm", password="pw")
+        account = Account.objects.create(
+            user=user, broker=Account.Broker.KIS,
+            account_type=Account.AccountType.PAPER, account_number="1",
+            name="A", app_key_encrypted="k", app_secret_encrypted="s",
+        )
+        stock = Stock.objects.create(market=Stock.Market.KOSPI, symbol="005930", name="삼성전자")
+        # 평단 70000, 5주 보유
+        PositionLedger.objects.create(
+            account=account, stock=stock, quantity_delta=D("5"), price=D("70000"),
+            reason="init", occurred_at=tz.now(),
+        )
+        broker = MM()
+        px = MM(); px.price = D("65000")  # -7.1% → 5% 손절선 이탈
+        broker.get_current_price.return_value = px
+
+        breached = find_breached_positions(account, broker, stop_ratio=0.05, take_ratio=0.1)
+        self.assertEqual(len(breached), 1)
+        self.assertEqual(breached[0][2], "STOP")
+        self.assertEqual(breached[0][1], D("5"))
+
+    def test_no_breach_within_bands(self):
+        from decimal import Decimal as D
+        from unittest.mock import MagicMock as MM
+        from django.utils import timezone as tz
+        from apps.stock.models import Stock
+        from apps.account.models import PositionLedger
+        from core.pipeline.risk_monitor import find_breached_positions
+
+        user = User.objects.create_user("rm2", password="pw")
+        account = Account.objects.create(
+            user=user, broker=Account.Broker.KIS,
+            account_type=Account.AccountType.PAPER, account_number="2",
+            name="A", app_key_encrypted="k", app_secret_encrypted="s",
+        )
+        stock = Stock.objects.create(market=Stock.Market.KOSPI, symbol="005930", name="삼성전자")
+        PositionLedger.objects.create(
+            account=account, stock=stock, quantity_delta=D("5"), price=D("70000"),
+            reason="init", occurred_at=tz.now(),
+        )
+        broker = MM()
+        px = MM(); px.price = D("70500")  # 밴드 내
+        broker.get_current_price.return_value = px
+        self.assertEqual(find_breached_positions(account, broker, 0.05, 0.1), [])
