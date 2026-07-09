@@ -370,3 +370,43 @@ class RiskMonitorTestCase(TestCase):
         px = MM(); px.price = D("70500")  # 밴드 내
         broker.get_current_price.return_value = px
         self.assertEqual(find_breached_positions(account, broker, 0.05, 0.1), [])
+
+
+from core.broker.kis.broker import parse_market_status
+
+
+class MarketStatusTestCase(TestCase):
+    def test_normal_is_tradeable(self):
+        st = parse_market_status({"stck_prpr": "70000", "stck_mxpr": "91000", "stck_llam": "49000", "trht_yn": "N"})
+        self.assertTrue(st["tradeable"])
+        self.assertFalse(st["at_limit"])
+
+    def test_upper_limit(self):
+        st = parse_market_status({"stck_prpr": "91000", "stck_mxpr": "91000", "stck_llam": "49000"})
+        self.assertTrue(st["at_upper_limit"])
+        self.assertFalse(st["tradeable"])
+
+    def test_halted(self):
+        st = parse_market_status({"stck_prpr": "70000", "stck_mxpr": "91000", "stck_llam": "49000", "trht_yn": "Y"})
+        self.assertTrue(st["halted"])
+        self.assertFalse(st["tradeable"])
+
+
+from core.broker.kis.broker import parse_orderbook
+
+
+class OrderbookTestCase(TestCase):
+    def test_parse_orderbook(self):
+        ob = parse_orderbook({
+            "bidp1": "69900", "askp1": "70000",
+            "bidp_rsqn1": "300", "askp_rsqn1": "100",
+        })
+        self.assertEqual(ob["bid1"], Decimal("69900"))
+        self.assertEqual(ob["ask1"], Decimal("70000"))
+        self.assertGreater(ob["spread_bps"], 0)
+        self.assertAlmostEqual(ob["imbalance"], 0.5, places=6)  # (300-100)/400
+
+    def test_empty_orderbook(self):
+        ob = parse_orderbook({})
+        self.assertIsNone(ob["spread_bps"])
+        self.assertEqual(ob["imbalance"], 0.0)

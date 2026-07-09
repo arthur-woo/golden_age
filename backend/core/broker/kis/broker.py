@@ -47,6 +47,55 @@ def parse_minute_candles(data: dict) -> list[dict]:
     return candles
 
 
+def parse_market_status(output: dict) -> dict:
+    """
+    현재가 응답(output)에서 거래 가능 상태를 판정한다.
+
+    - halted: 거래정지(trht_yn='Y')
+    - at_upper/at_lower_limit: 상/하한가 근접(현재가가 상/하한가 도달)
+    - tradeable: 정지 아니고 상/하한 미도달
+    """
+
+    def _d(key: str) -> Decimal:
+        return Decimal(output.get(key, "0") or "0")
+
+    prpr, mxpr, llam = _d("stck_prpr"), _d("stck_mxpr"), _d("stck_llam")
+    at_upper = mxpr > 0 and prpr >= mxpr
+    at_lower = llam > 0 and prpr <= llam
+    halted = str(output.get("trht_yn", "")).upper() == "Y"
+    return {
+        "halted": halted,
+        "at_upper_limit": at_upper,
+        "at_lower_limit": at_lower,
+        "at_limit": at_upper or at_lower,
+        "tradeable": not halted and not at_upper and not at_lower,
+    }
+
+
+def parse_orderbook(output: dict) -> dict:
+    """
+    호가 응답(output)에서 최우선 호가·스프레드·호가잔량 불균형(OBI)을 계산한다.
+
+    반환: {bid1, ask1, spread_bps, imbalance(-1~1)}
+    """
+
+    def _d(key: str) -> Decimal:
+        return Decimal(output.get(key, "0") or "0")
+
+    bid1, ask1 = _d("bidp1"), _d("askp1")
+    bid_qty, ask_qty = _d("bidp_rsqn1"), _d("askp_rsqn1")
+    mid = (bid1 + ask1) / 2 if bid1 > 0 and ask1 > 0 else Decimal("0")
+    spread_bps = float((ask1 - bid1) / mid * 10000) if mid > 0 else None
+    total = bid_qty + ask_qty
+    imbalance = float((bid_qty - ask_qty) / total) if total > 0 else 0.0
+    return {
+        "bid1": bid1,
+        "ask1": ask1,
+        "spread_bps": spread_bps,
+        "imbalance": imbalance,
+    }
+
+
 def parse_executions(data: dict) -> list[dict]:
     """
     KIS 일별주문체결조회 응답(output1)을 파싱한다.
@@ -149,6 +198,30 @@ class KoreaInvestmentBroker(BaseBroker):
         volume = Decimal(output.get("acml_vol", "0"))
 
         return PriceDTO(symbol=symbol, price=price, volume=volume, raw_payload=data)
+
+    def get_market_status(self, symbol: str) -> dict:
+        """종목의 거래 가능 상태(정지/상하한) 조회. 후보 필터 게이트용."""
+        headers = {"tr_id": "FHKST01010100"}
+        params = {"FID_COND_MRKT_DIV_CODE": "J", "FID_INPUT_ISCD": symbol}
+        response = self.client.request(
+            method="GET",
+            path="/uapi/domestic-stock/v1/quotations/inquire-price",
+            headers=headers,
+            params=params,
+        )
+        return parse_market_status(response.json().get("output", {}) or {})
+
+    def get_orderbook(self, symbol: str) -> dict:
+        """종목 호가(최우선 호가/스프레드/OBI) 조회. 미시구조 피처·스프레드 컷용."""
+        headers = {"tr_id": "FHKST01010200"}
+        params = {"FID_COND_MRKT_DIV_CODE": "J", "FID_INPUT_ISCD": symbol}
+        response = self.client.request(
+            method="GET",
+            path="/uapi/domestic-stock/v1/quotations/inquire-asking-price-exp-ccn",
+            headers=headers,
+            params=params,
+        )
+        return parse_orderbook((response.json().get("output1") or {}))
 
     def get_minute_candles(self, symbol: str, to_time: str = "") -> list[dict]:
         """
