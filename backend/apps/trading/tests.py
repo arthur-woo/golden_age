@@ -812,3 +812,141 @@ class MultiBarBacktestTestCase(TestCase):
         self.assertGreater(m["num_fills"], 0)
         self.assertGreater(m["total_cost"], 0.0)  # 실거래 비용 모델이 반영됨
         self.assertEqual(len(result["equity_curve"]), result["num_bars"] + 1)
+
+
+class UniverseBacktestTestCase(TestCase):
+    """멀티종목 드라이버: A-3 후보필터가 비유동 종목을 제외하고 포트폴리오 TCA를 낸다."""
+
+    def setUp(self):
+        from datetime import datetime, timezone as dt_tz
+
+        self.user = User.objects.create_user(username="uni", password="pw")
+        self.account = Account.objects.create(
+            user=self.user, broker=Account.Broker.KIS,
+            account_type=Account.AccountType.PAPER, account_number="444",
+            name="U", app_key_encrypted="k", app_secret_encrypted="s",
+        )
+        self.base = datetime(2024, 1, 2, tzinfo=dt_tz.utc)
+        # 유동 2종목(대량 거래) + 비유동 1종목(소량)
+        self.liquid = [
+            Stock.objects.create(market=Stock.Market.KOSPI, symbol=s, name=s)
+            for s in ("000001", "000002")
+        ]
+        self.illiquid = Stock.objects.create(
+            market=Stock.Market.KOSPI, symbol="000003", name="illiquid"
+        )
+        for stock in self.liquid + [self.illiquid]:
+            vol = 1_000_000 if stock in self.liquid else 100
+            for i in range(10):
+                p = Decimal(str(70000 + i * 100))
+                Candle.objects.create(
+                    stock=stock, timeframe=Candle.Timeframe.DAY_1,
+                    opened_at=self.base + timedelta(days=i),
+                    open_price=p, high_price=p, low_price=p, close_price=p,
+                    volume=Decimal(str(vol)), source="test",
+                )
+        self.trader = Trader.objects.create(
+            account=self.account, name="Bot", code="BOT",
+            position_size_ratio=Decimal("0.05"), entry_threshold=Decimal("0.5"),
+            stop_loss_ratio=Decimal("0.05"), take_profit_ratio=Decimal("0.1"),
+            max_exposure_ratio=Decimal("0.3"),
+            config_payload={"candle_timeframe": "1d"},
+        )
+        strat = Strategy.objects.create(owner=self.user, namespace="t", name="M", code="M")
+        sv = StrategyVersion.objects.create(
+            strategy=strat, version="v1", module_path="apps.trading.tests",
+            class_name="MockStrategy", status=StrategyVersion.Status.ACTIVE,
+        )
+        TraderStrategy.objects.create(
+            trader=self.trader, strategy_version=sv, slot=TraderStrategy.Slot.FIRST,
+            weight=Decimal("1.0"), config_payload={"action": "BUY", "confidence_score": "0.8"},
+            is_active=True,
+        )
+
+    def test_candidate_filter_excludes_illiquid(self):
+        from core.backtest.universe_runner import run_universe_backtest
+        from core.universe.filter import CandidateConfig
+        from apps.order.models import Order
+
+        cfg = CandidateConfig(min_turnover=1e8, vol_low=0.0, vol_high=1.0, top_k=5)
+        bars = [self.base + timedelta(days=8), self.base + timedelta(days=9)]
+        result = run_universe_backtest(
+            self.trader, self.liquid + [self.illiquid], bars, Decimal("100000000"),
+            candidate_config=cfg,
+        )
+
+        # 비유동 종목은 한 번도 후보에 못 들어 주문 없음
+        self.assertEqual(Order.objects.filter(stock=self.illiquid).count(), 0)
+        # 유동 종목은 거래 발생
+        self.assertGreater(Order.objects.filter(stock__in=self.liquid).count(), 0)
+        # 매 봉 후보 2종목(유동)만 선택
+        self.assertTrue(all(c == 2 for c in result["selected_counts"]))
+        self.assertIn("net_pnl", result["metrics"])
+        self.assertGreater(result["metrics"]["num_fills"], 0)
+
+
+class ContextFeatureFlowTestCase(TestCase):
+    """A-4: context가 trader_executor를 거쳐 FeatureSnapshot에 조인되는지 검증."""
+
+    @patch("core.pipeline.trader_executor.get_broker_for_account")
+    def test_context_reaches_feature_snapshot(self, mock_broker_fn):
+        from datetime import datetime, timezone as dt_tz
+        from apps.market.models import FeatureSnapshot
+        from core.pipeline.trader_executor import execute_trader_for_stock
+
+        user = User.objects.create_user(username="ctx", password="pw")
+        account = Account.objects.create(
+            user=user, broker=Account.Broker.KIS,
+            account_type=Account.AccountType.PAPER, account_number="555",
+            name="C", app_key_encrypted="k", app_secret_encrypted="s",
+        )
+        stock = Stock.objects.create(market=Stock.Market.KOSPI, symbol="005930", name="삼성전자")
+        base = datetime(2024, 1, 2, 9, 0, tzinfo=dt_tz.utc)
+        for i in range(20):
+            p = Decimal(str(70000 + i * 10))
+            Candle.objects.create(
+                stock=stock, timeframe=Candle.Timeframe.MIN_1,
+                opened_at=base + timedelta(minutes=i),
+                open_price=p, high_price=p, low_price=p, close_price=p,
+                volume=Decimal("1000"), source="test",
+            )
+        trader = Trader.objects.create(
+            account=account, name="Bot", code="BOT", ml_filter_enabled=True,
+            position_size_ratio=Decimal("0.1"), entry_threshold=Decimal("0.5"),
+            stop_loss_ratio=Decimal("0.05"), take_profit_ratio=Decimal("0.1"),
+            max_exposure_ratio=Decimal("0.3"), config_payload={"candle_timeframe": "1m"},
+        )
+        strat = Strategy.objects.create(owner=user, namespace="t", name="M", code="M")
+        sv = StrategyVersion.objects.create(
+            strategy=strat, version="v1", module_path="apps.trading.tests",
+            class_name="MockStrategy", status=StrategyVersion.Status.ACTIVE,
+        )
+        TraderStrategy.objects.create(
+            trader=trader, strategy_version=sv, slot=TraderStrategy.Slot.FIRST,
+            weight=Decimal("1.0"), config_payload={"action": "BUY", "confidence_score": "0.8"},
+            is_active=True,
+        )
+
+        broker = MagicMock()
+        bal = MagicMock(); bal.cash_balance = Decimal("10000000"); bal.total_asset_value = Decimal("10000000"); bal.raw_payload = {}
+        broker.get_balance.return_value = bal
+        price = MagicMock(); price.price = Decimal("70190"); broker.get_current_price.return_value = price
+        mock_broker_fn.return_value = broker
+
+        account_run = ExecutionRun.objects.create(
+            account=account, run_type=ExecutionRun.RunType.SCHEDULED,
+            status=ExecutionRun.Status.RUNNING, started_at=timezone.now(),
+        )
+        run = TraderExecutionRun.objects.create(
+            account_run=account_run, trader=trader,
+            status=TraderExecutionRun.Status.RUNNING, started_at=timezone.now(),
+        )
+        execute_trader_for_stock(
+            trader, run, stock, None,
+            context={"index_ret_1": 0.0005, "cs_return_rank": 0.7},
+        )
+
+        fs = FeatureSnapshot.objects.first()
+        self.assertIsNotNone(fs)
+        self.assertEqual(fs.feature_payload["cs_return_rank"], 0.7)
+        self.assertIn("excess_ret_1", fs.feature_payload)  # index_ret_1 + ret_1 조인

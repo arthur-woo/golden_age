@@ -35,16 +35,18 @@ def capture_feature_snapshot(
     candles: list,
     current_price: Decimal,
     timeframe: str = Candle.Timeframe.DAY_1,
+    context: Optional[dict] = None,
 ) -> FeatureSnapshot:
     """
     현재 시점의 Feature 스냅샷을 mkt_feature_snapshot에 저장한다.
 
     Feature 계산은 core.features.builder.build_features(실거래/백테스트/학습 공용)에 위임한다.
+    context: 지수/레짐/횡단면 컨텍스트(설계 3.1 (7),(8))를 Feature에 조인.
     """
     return FeatureSnapshot.objects.create(
         stock=stock,
         timeframe=timeframe,
-        feature_payload=build_features(candles, float(current_price)),
+        feature_payload=build_features(candles, float(current_price), context),
         source_payload={"candle_count": len(candles)},
         captured_at=timezone.now(),
     )
@@ -172,12 +174,14 @@ def execute_trader_for_stock(
     regime_snapshot: Optional[RegimeSnapshot] = None,
     as_of=None,
     broker=None,
+    context: Optional[dict] = None,
 ):
     """
     특정 Trader가 특정 Stock에 대해 매매 전략을 평가하고 주문을 실행합니다.
 
     as_of: 지정 시 그 시각 이전(포함) 캔들만 사용한다(백테스트 look-ahead 방지).
     broker: 주입 시 그대로 사용한다(백테스트 BacktestBroker). 미주입 시 계좌 브로커.
+    context: Feature에 조인할 지수/레짐/횡단면 컨텍스트(A-4).
     """
     account = trader.account
     broker = broker or get_broker_for_account(account)
@@ -239,7 +243,7 @@ def execute_trader_for_stock(
     feature_snapshot = None
     if trader.ml_filter_enabled:
         feature_snapshot = capture_feature_snapshot(
-            stock, candles, current_price, timeframe
+            stock, candles, current_price, timeframe, context
         )
 
     # 4. 리스크 관리: 손절/익절 조건 체크 (포지션이 있는 경우 우선 처리)
