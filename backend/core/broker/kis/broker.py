@@ -75,15 +75,15 @@ class KoreaInvestmentBroker(BaseBroker):
     def __init__(self, account: Account):
         self.client = KISClient(account)
 
-    def get_balance(self) -> AccountBalanceDTO:
+    def _inquire_balance(self) -> dict:
+        """잔고조회 원본 응답(output1=보유종목, output2=예수금/평가)을 반환한다."""
         # TR_ID는 모의투자와 실전투자가 다를 수 있음 (예: VTTC8434R, TTTC8434R)
         tr_id = (
             "VTTC8434R"
             if self.client.account.account_type == Account.AccountType.PAPER
             else "TTTC8434R"
         )
-
-        headers = {"tr_id": tr_id}
+        headers = {"tr_id": tr_id, "custtype": "P"}
         params = {
             "CANO": self.client.account.account_number[:8],
             "ACNT_PRDT_CD": self.client.account.account_number[8:]
@@ -99,27 +99,35 @@ class KoreaInvestmentBroker(BaseBroker):
             "CTX_AREA_FK100": "",
             "CTX_AREA_NK100": "",
         }
-
         response = self.client.request(
             method="GET",
             path="/uapi/domestic-stock/v1/trading/inquire-balance",
             headers=headers,
             params=params,
         )
-        data = response.json()
+        return response.json()
 
-        # TODO: 응답 코드(rt_cd) 확인 및 예외 처리
-
-        # 잔고 추출 (가정된 응답 구조)
-        output2 = data.get("output2", [{}])[0]
+    def get_balance(self) -> AccountBalanceDTO:
+        data = self._inquire_balance()
+        output2 = (data.get("output2") or [{}])[0]
         cash_balance = Decimal(output2.get("dnca_tot_amt", "0"))  # 예수금
         total_asset_value = Decimal(output2.get("tot_evlu_amt", "0"))  # 총평가금액
-
         return AccountBalanceDTO(
             cash_balance=cash_balance,
             total_asset_value=total_asset_value,
             raw_payload=data,
         )
+
+    def get_positions(self) -> dict:
+        """브로커 보유 수량 {symbol: qty>0}. 리컨실리에이션용."""
+        data = self._inquire_balance()
+        positions = {}
+        for row in data.get("output1", []) or []:
+            symbol = row.get("pdno")
+            qty = Decimal(row.get("hldg_qty", "0") or "0")
+            if symbol and qty > 0:
+                positions[symbol] = qty
+        return positions
 
     def get_current_price(self, symbol: str) -> PriceDTO:
         headers = {"tr_id": "FHKST01010100"}

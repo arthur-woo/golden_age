@@ -277,3 +277,41 @@ class RegisterBackfillScheduleTestCase(TestCase):
         self.assertEqual(s.schedule_type, Schedule.MINUTES)
         self.assertEqual(s.minutes, 5)
         self.assertIn("backfill_universe", s.args)
+
+
+class ReconcileTestCase(TestCase):
+    def test_reconcile_applies_adjustment(self):
+        from decimal import Decimal as D
+        from apps.stock.models import Stock
+        from apps.account.models import PositionLedger
+        from core.backtest.broker import BacktestBroker
+        from core.pipeline.reconcile import reconcile_account
+        from django.utils import timezone as tz
+
+        user = User.objects.create_user("recon", password="pw")
+        account = Account.objects.create(
+            user=user, broker=Account.Broker.KIS,
+            account_type=Account.AccountType.PAPER, account_number="1",
+            name="A", app_key_encrypted="k", app_secret_encrypted="s",
+        )
+        stock = Stock.objects.create(market=Stock.Market.KOSPI, symbol="000001", name="A")
+        # 내부 원장 7주
+        PositionLedger.objects.create(
+            account=account, stock=stock, quantity_delta=D("7"), price=D("100"),
+            reason="init", occurred_at=tz.now(),
+        )
+        # 브로커 실보유 10주
+        broker = BacktestBroker(D("0"))
+        broker.positions["000001"] = D("10")
+
+        # 대조만
+        report = reconcile_account(account, broker, apply=False)
+        self.assertEqual(report["positions"]["000001"]["diff"], 3.0)
+        self.assertEqual(report["adjusted"], 0)
+
+        # 보정 적용 → 내부가 브로커(10)에 맞춰짐
+        applied = reconcile_account(account, broker, apply=True)
+        self.assertEqual(applied["adjusted"], 1)
+        from django.db.models import Sum
+        net = PositionLedger.objects.filter(account=account).aggregate(q=Sum("quantity_delta"))["q"]
+        self.assertEqual(net, D("10"))

@@ -42,6 +42,10 @@ class BacktestBroker(BaseBroker):
         """현재 봉의 시세를 주입한다(백테스트 루프가 매 봉 호출)."""
         self._market[symbol] = (Decimal(str(price)), Decimal(str(volume)))
 
+    def get_positions(self) -> dict:
+        """보유 수량 딕셔너리 {symbol: qty>0}. 리컨실리에이션용."""
+        return {s: q for s, q in self.positions.items() if q > 0}
+
     # --- BaseBroker 구현 ---
     def get_current_price(self, symbol: str) -> PriceDTO:
         price, volume = self._market[symbol]
