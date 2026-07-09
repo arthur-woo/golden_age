@@ -563,3 +563,41 @@ class HotSetTestCase(TestCase):
         mock_run.assert_called_once()
         subscribed = mock_run.call_args[0][0]
         self.assertEqual(subscribed, ["000003", "000001"])
+
+
+from datetime import date as _date3
+from core.broker.kis.realtime import KST as _KST3
+
+
+class BackfillUniverseTestCase(TestCase):
+    def test_backfill_multiple_stocks(self):
+        from django.contrib.auth import get_user_model
+        from apps.account.models import Account
+        from core.market.backfill import backfill_universe
+
+        user = get_user_model().objects.create_user("bu", password="pw")
+        account = Account.objects.create(
+            user=user, broker=Account.Broker.KIS,
+            account_type=Account.AccountType.PAPER, account_number="1",
+            name="A", app_key_encrypted="k", app_secret_encrypted="s",
+        )
+        stocks = [
+            Stock.objects.create(market=Stock.Market.KOSPI, symbol=s, name=s)
+            for s in ("000001", "000002")
+        ]
+        parsed = [{
+            "opened_at": datetime(2024, 1, 2, 9, 0, tzinfo=_KST3),
+            "open": Decimal("100"), "high": Decimal("101"), "low": Decimal("99"),
+            "close": Decimal("100"), "volume": Decimal("10"),
+        }]
+        with _patch2(
+            "core.broker.kis.broker.KoreaInvestmentBroker.get_minute_candles",
+            return_value=parsed,
+        ):
+            result = backfill_universe(account, stocks, pages=1)
+
+        self.assertEqual(result["stocks"], 2)
+        self.assertEqual(result["created"], 2)
+        self.assertEqual(
+            Candle.objects.filter(source="kis_rest", timeframe=Candle.Timeframe.MIN_1).count(), 2
+        )

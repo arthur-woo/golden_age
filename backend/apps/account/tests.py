@@ -254,3 +254,26 @@ class RegisterScheduleTestCase(TestCase):
         from django.core.management.base import CommandError
         with self.assertRaises(CommandError):
             call_command("register_schedule", "--account-id", "99999", stdout=StringIO())
+
+
+class RegisterBackfillScheduleTestCase(TestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(username="bfsched", password="pw")
+        self.account = Account.objects.create(
+            user=self.user, broker=Account.Broker.KIS,
+            account_type=Account.AccountType.PAPER, account_number="1234567801",
+            name="A", app_key_encrypted="k", app_secret_encrypted="s",
+        )
+
+    def test_creates_backfill_schedule(self):
+        from django.core.management import call_command
+        from io import StringIO
+        from django_q.models import Schedule
+
+        call_command("register_backfill_schedule", "--account-id", str(self.account.id),
+                     "--minutes", "5", stdout=StringIO())
+        s = Schedule.objects.get(name=f"backfill-universe-{self.account.id}")
+        self.assertEqual(s.func, "django.core.management.call_command")
+        self.assertEqual(s.schedule_type, Schedule.MINUTES)
+        self.assertEqual(s.minutes, 5)
+        self.assertIn("backfill_universe", s.args)
