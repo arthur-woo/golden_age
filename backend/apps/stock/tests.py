@@ -121,3 +121,48 @@ class CandidateFilterTestCase(SimpleTestCase):
         self.assertTrue(is_entry_window(None, self.cfg))
         self.assertFalse(is_entry_window(0, self.cfg))
         self.assertTrue(is_entry_window(100, self.cfg))
+
+
+from datetime import datetime as _dt, timezone as _tz
+from decimal import Decimal as _D
+from io import StringIO as _SIO
+from django.core.management import call_command as _cc
+from apps.market.models import Candle as _Candle
+from apps.stock.models import (
+    UniverseMembership as _UM,
+    get_collection_stock_ids as _get_collection,
+    sync_collection_universe as _sync_collection,
+)
+
+
+class CollectionUniverseTestCase(TestCase):
+    def setUp(self):
+        self.a = Stock.objects.create(market=Stock.Market.KOSPI, symbol="000001", name="A")
+        self.b = Stock.objects.create(market=Stock.Market.KOSPI, symbol="000002", name="B")
+
+    def test_sync_is_idempotent_and_appends(self):
+        added = _sync_collection([self.a, self.b])
+        self.assertEqual(added, 2)
+        self.assertEqual(set(_get_collection()), {self.a.id, self.b.id})
+
+        # 재실행: 이미 활성이면 추가 없음
+        again = _sync_collection([self.a, self.b])
+        self.assertEqual(again, 0)
+        # 활성 편입 레코드는 종목당 1개
+        self.assertEqual(
+            _UM.objects.filter(universe=_UM.Universe.COLLECTION, effective_to__isnull=True).count(),
+            2,
+        )
+
+    def test_command_all_with_candles(self):
+        _Candle.objects.create(
+            stock=self.a, timeframe=Candle_TF_DAY, opened_at=_dt(2024, 1, 2, tzinfo=_tz.utc),
+            open_price=_D("100"), high_price=_D("100"), low_price=_D("100"),
+            close_price=_D("100"), volume=_D("1"), source="test",
+        )
+        _cc("sync_collection_universe", "--all-with-candles", stdout=_SIO())
+        self.assertIn(self.a.id, _get_collection())
+        self.assertNotIn(self.b.id, _get_collection())  # 캔들 없는 종목은 제외
+
+
+Candle_TF_DAY = _Candle.Timeframe.DAY_1

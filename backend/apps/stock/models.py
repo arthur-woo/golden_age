@@ -64,6 +64,7 @@ class UniverseMembership(models.Model):
     class Universe(models.TextChoices):
         KOSPI200 = "KOSPI200", "코스피200"
         KOSDAQ150 = "KOSDAQ150", "코스닥150"
+        COLLECTION = "COLLECTION", "수집대상"  # 매매와 분리된 상시 수집 유니버스(넓은 상위집합)
         CUSTOM = "CUSTOM", "사용자정의"
 
     universe = models.CharField(max_length=32, choices=Universe.choices)
@@ -108,3 +109,36 @@ def get_universe_stock_ids(universe: str, at=None) -> list[int]:
         effective_from__lte=at,
     ).filter(models.Q(effective_to__isnull=True) | models.Q(effective_to__gt=at))
     return list(qs.values_list("stock_id", flat=True).distinct())
+
+
+def get_collection_stock_ids(at=None) -> list[int]:
+    """상시 수집 유니버스(COLLECTION)에 편입된 종목 id 목록(point-in-time)."""
+    return get_universe_stock_ids(UniverseMembership.Universe.COLLECTION, at=at)
+
+
+def sync_collection_universe(stocks, effective_from=None) -> int:
+    """
+    주어진 종목들을 수집 유니버스(COLLECTION)에 활성 편입한다(멱등, append-only).
+
+    이미 활성 편입된 종목은 건너뛴다. 편출(effective_to 설정)은 별도로 하지 않는다 —
+    수집은 한 번 시작하면 계속(데이터 구멍 방지). 신규 추가 종목 수를 반환한다.
+    """
+    now = effective_from or timezone.now()
+    active_ids = set(
+        UniverseMembership.objects.filter(
+            universe=UniverseMembership.Universe.COLLECTION,
+            effective_to__isnull=True,
+        ).values_list("stock_id", flat=True)
+    )
+    to_add = [s for s in stocks if s.id not in active_ids]
+    UniverseMembership.objects.bulk_create(
+        [
+            UniverseMembership(
+                universe=UniverseMembership.Universe.COLLECTION,
+                stock=s,
+                effective_from=now,
+            )
+            for s in to_add
+        ]
+    )
+    return len(to_add)
