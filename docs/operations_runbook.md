@@ -79,6 +79,10 @@ python manage.py import_csv_candles --dir ../research/data/csv_data
 python manage.py sync_collection_universe --all-with-candles
 #   또는 특정 종목만:
 python manage.py sync_collection_universe --symbols 005930 000660 035420
+
+# 2-3) 매매 유니버스(KOSPI200 등) 리밸런싱 — 편입/편출 이력 유지(생존편향 제거)
+python manage.py import_universe_membership --universe KOSPI200 --file kospi200.txt
+#   또는: --symbols 005930 000660 ...
 ```
 
 ---
@@ -87,8 +91,8 @@ python manage.py sync_collection_universe --symbols 005930 000660 035420
 
 ```bash
 # 3-1) hot set 실시간 수집 (장중 상주) — 미래 1분봉 누적의 주력
-#      WS 세션 한도(~40) 내에서 거래대금 상위 종목만 구독
-python manage.py collect_realtime --universe --top 40 --account-id <ID>
+#      hot set이 세션 한도(~40) 초과 시 자동으로 다중 WS 세션 분산 구독
+python manage.py collect_realtime --universe --top 80 --account-id <ID>
 
 # 3-2) broad 백필 자동화 (무인) — 나머지·구멍 메우기 (당일~최근)
 python manage.py register_backfill_schedule --account-id <ID> --minutes 5 --pages 2
@@ -112,8 +116,28 @@ python manage.py run_account_pipeline <ID>
 python manage.py register_schedule --account-id <ID> --minutes 1
 ```
 
-> 실거래 전 반드시 **PAPER**로 검증. `Trader.config_payload`로 사이징/리스크 한도 조정:
-> `{"advanced_sizing": true, "risk_limits": {"max_position_ratio": 0.15, "daily_loss_limit_ratio": 0.03}}`
+> 실거래 전 반드시 **PAPER**로 검증. `Trader.config_payload`로 사이징/리스크/청산 조정:
+> `{"advanced_sizing": true, "eod_flatten": true, "risk_limits": {"max_position_ratio": 0.15, "daily_loss_limit_ratio": 0.03}}`
+> (`eod_flatten`=종가 강제청산, `daily_loss_limit_ratio`=일일손실 킬스위치)
+
+---
+
+## 4-2. 안전 감시·정산 (상주/주기 실행 권장)
+
+```bash
+# 상시 손절/익절 감시 — 분 파이프라인보다 자주(예: 15~30초) 스케줄
+python manage.py monitor_risk <ID> --stop 0.05 --take 0.1
+
+# 원장 리컨실리에이션 — 브로커 실보유 ↔ 내부 원장 대조/보정 (재시작·불일치 시)
+python manage.py reconcile_account <ID>            # 대조만
+python manage.py reconcile_account <ID> --apply    # 브로커 기준 보정
+
+# 헬스체크 — 데이터 신선도·미체결·마지막 실행 상태 (이상 시 exit 1 → 알림 연동)
+python manage.py health_check <ID>
+```
+
+> 지수 레짐(B-5)을 쓰려면 `settings.REGIME_INDEX_SYMBOL = "069500"`(예: KODEX200) 설정 +
+> 그 종목을 수집/백필 대상에 포함. CHAOS 레짐이면 신규 진입이 자동 차단된다.
 
 ---
 
@@ -141,7 +165,7 @@ python manage.py train_daytrading_model --symbol 005930 --model-version v1 --dep
 
 ## 7. 주의사항
 
-- **아무 것도 자동 상주 아님**: `collect_realtime`, `qcluster`는 사람이 띄워 유지해야 한다(운영 시 systemd/supervisor 권장).
+- **아무 것도 자동 상주 아님**: `collect_realtime`, `qcluster`는 사람이 띄워 유지해야 한다. 상주 배포는 [docs/deploy/README.md](deploy/README.md)의 systemd/supervisor 예시 참고.
 - **장 시간**: KST 09:00~15:30 밖에는 실시간 체결이 없다.
 - **보안**: `app_key`/`app_secret`가 현재 **평문 저장**. LIVE 전 암호화 필요.
 - **수집 구멍 방지**: 수집은 COLLECTION 상위집합에 **append-only**(편출돼도 계속). 매매만 시점별 필터.
