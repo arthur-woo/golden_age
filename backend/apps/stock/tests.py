@@ -166,3 +166,25 @@ class CollectionUniverseTestCase(TestCase):
 
 
 Candle_TF_DAY = _Candle.Timeframe.DAY_1
+
+
+class RebalanceUniverseTestCase(TestCase):
+    def test_rebalance_adds_and_removes(self):
+        from apps.stock.models import (
+            UniverseMembership as UM,
+            get_universe_stock_ids,
+            rebalance_universe,
+        )
+        a = Stock.objects.create(market=Stock.Market.KOSPI, symbol="A1", name="A")
+        b = Stock.objects.create(market=Stock.Market.KOSPI, symbol="B1", name="B")
+        c = Stock.objects.create(market=Stock.Market.KOSPI, symbol="C1", name="C")
+
+        r1 = rebalance_universe(UM.Universe.KOSPI200, [a, b])
+        self.assertEqual(r1["added"], 2)
+        self.assertEqual(set(get_universe_stock_ids(UM.Universe.KOSPI200)), {a.id, b.id})
+
+        # 리밸런싱: A 편출, C 편입, B 유지
+        r2 = rebalance_universe(UM.Universe.KOSPI200, [b, c])
+        self.assertEqual(r2["added"], 1)
+        self.assertEqual(r2["removed"], 1)
+        self.assertEqual(set(get_universe_stock_ids(UM.Universe.KOSPI200)), {b.id, c.id})

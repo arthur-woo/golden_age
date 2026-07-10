@@ -116,6 +116,31 @@ def get_collection_stock_ids(at=None) -> list[int]:
     return get_universe_stock_ids(UniverseMembership.Universe.COLLECTION, at=at)
 
 
+def rebalance_universe(universe: str, stocks, at=None) -> dict:
+    """
+    지수 유니버스(예: KOSPI200)를 주어진 구성종목으로 리밸런싱한다.
+
+    목록에서 빠진 활성 종목은 편출(effective_to=at), 새로 든 종목은 편입한다.
+    point-in-time 이력이 남아 백테스트 생존편향을 제거한다. {added, removed} 반환.
+    """
+    now = at or timezone.now()
+    target_ids = {s.id for s in stocks}
+    active = UniverseMembership.objects.filter(
+        universe=universe, effective_to__isnull=True
+    )
+    active_ids = set(active.values_list("stock_id", flat=True))
+
+    removed = active.exclude(stock_id__in=target_ids).update(effective_to=now)
+    to_add = [s for s in stocks if s.id not in active_ids]
+    UniverseMembership.objects.bulk_create(
+        [
+            UniverseMembership(universe=universe, stock=s, effective_from=now)
+            for s in to_add
+        ]
+    )
+    return {"added": len(to_add), "removed": removed}
+
+
 def sync_collection_universe(stocks, effective_from=None) -> int:
     """
     주어진 종목들을 수집 유니버스(COLLECTION)에 활성 편입한다(멱등, append-only).
