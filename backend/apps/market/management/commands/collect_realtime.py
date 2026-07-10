@@ -75,14 +75,6 @@ class Command(BaseCommand):
 
         if not symbols:
             raise CommandError("구독할 종목이 없습니다(수집 유니버스/캔들 확인).")
-        if len(symbols) > MAX_WS_SYMBOLS:
-            self.stdout.write(
-                self.style.WARNING(
-                    f"WS 세션 한도({MAX_WS_SYMBOLS}) 초과 → 상위 {MAX_WS_SYMBOLS}종목만 구독. "
-                    f"나머지는 REST 백필로 커버하세요."
-                )
-            )
-            symbols = symbols[:MAX_WS_SYMBOLS]
 
         if not opts.get("account_id"):
             raise CommandError("실시간 모드에는 --account-id 가 필요합니다. (검증은 --demo 사용)")
@@ -96,7 +88,11 @@ class Command(BaseCommand):
 
         adapter = KISRealtimeAdapter(account, collector=collector)
         self.stdout.write(f"KIS 실시간 접속 시작: {len(symbols)}종목 (Ctrl+C로 종료)")
-        adapter.connect_and_run(symbols)
+        if len(symbols) > MAX_WS_SYMBOLS:
+            self.stdout.write(f"세션 한도({MAX_WS_SYMBOLS}) 초과 → 다중 세션 분산 구독")
+            adapter.connect_and_run_multi(symbols)
+        else:
+            adapter.connect_and_run(symbols)
 
     def _get_stock(self, opts):
         try:

@@ -410,3 +410,37 @@ class OrderbookTestCase(TestCase):
         ob = parse_orderbook({})
         self.assertIsNone(ob["spread_bps"])
         self.assertEqual(ob["imbalance"], 0.0)
+
+
+class HealthCheckTestCase(TestCase):
+    def _account(self, n):
+        user = User.objects.create_user(f"h{n}", password="pw")
+        return Account.objects.create(
+            user=user, broker=Account.Broker.KIS,
+            account_type=Account.AccountType.PAPER, account_number=str(n),
+            name="A", app_key_encrypted="k", app_secret_encrypted="s",
+        )
+
+    def test_fresh_data_is_healthy(self):
+        from decimal import Decimal as D
+        from apps.stock.models import Stock
+        from apps.market.models import Candle
+        from core.pipeline.health import system_health
+
+        account = self._account(1)
+        stock = Stock.objects.create(market=Stock.Market.KOSPI, symbol="005930", name="삼성")
+        Candle.objects.create(
+            stock=stock, timeframe=Candle.Timeframe.MIN_1, opened_at=timezone.now(),
+            open_price=D("1"), high_price=D("1"), low_price=D("1"), close_price=D("1"),
+            volume=D("1"), source="test",
+        )
+        h = system_health(account, stale_minutes=5)
+        self.assertTrue(h["healthy"])
+        self.assertFalse(h["data_stale"])
+
+    def test_stale_data_is_unhealthy(self):
+        from core.pipeline.health import system_health
+        account = self._account(2)
+        h = system_health(account, stale_minutes=5)  # 캔들 없음 → stale
+        self.assertFalse(h["healthy"])
+        self.assertTrue(h["data_stale"])

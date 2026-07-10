@@ -32,7 +32,12 @@ logger = logging.getLogger(__name__)
 REALTIME_TRADE_TR_ID = "H0STCNT0"  # 실시간 주식체결가
 FIELDS_PER_RECORD = 46  # H0STCNT0 레코드당 필드 수
 KST = dt_timezone(timedelta(hours=9))  # 한국 표준시
-MAX_WS_SYMBOLS = 40  # KIS 실시간 세션당 등록 종목 수 한도(근사). 초과분은 REST 백필로 커버.
+MAX_WS_SYMBOLS = 40  # KIS 실시간 세션당 등록 종목 수 한도(근사).
+
+
+def chunk_symbols(symbols: list, size: int) -> list:
+    """종목 리스트를 size 크기로 분할한다(다중 WS 세션 배분용)."""
+    return [symbols[i : i + size] for i in range(0, len(symbols), size)]
 
 
 @dataclass(frozen=True)
@@ -200,3 +205,27 @@ class KISRealtimeAdapter:
                     self._handle_control(ws, raw)
         finally:
             ws.close()
+
+    def connect_and_run_multi(self, symbols: list[str]):  # pragma: no cover
+        """
+        WS 세션 한도를 넘는 종목을 여러 연결(스레드)로 분산 구독한다.
+
+        각 청크는 독립 collector를 쓰고(심볼 disjoint) 적재는 멱등이라 충돌 없음.
+        """
+        import threading
+
+        chunks = chunk_symbols(symbols, MAX_WS_SYMBOLS)
+        threads = []
+        for chunk in chunks:
+            adapter = KISRealtimeAdapter(
+                self.account,
+                collector=RealtimeCollector(self.collector.source),
+                trade_date=self.trade_date,
+            )
+            t = threading.Thread(
+                target=adapter.connect_and_run, args=(chunk,), daemon=True
+            )
+            t.start()
+            threads.append(t)
+        for t in threads:
+            t.join()

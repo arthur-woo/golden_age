@@ -643,3 +643,11 @@ class IndexRegimeSnapshotTestCase(TestCase):
         self.assertIsNone(_build_index_regime(account))  # 미설정 시 None
         with self.settings(REGIME_INDEX_SYMBOL="069500"):
             self.assertIsNotNone(_build_index_regime(account))
+
+
+class ChunkSymbolsTestCase(SimpleTestCase):
+    def test_chunking(self):
+        from core.broker.kis.realtime import chunk_symbols
+        self.assertEqual(chunk_symbols(list(range(5)), 2), [[0, 1], [2, 3], [4]])
+        self.assertEqual(chunk_symbols([], 40), [])
+        self.assertEqual(chunk_symbols([1, 2], 40), [[1, 2]])
